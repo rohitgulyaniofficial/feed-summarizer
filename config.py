@@ -194,6 +194,15 @@ class Config:
         # Data management configuration
         self.ENTRY_EXPIRATION_DAYS = self._validate_positive_int("ENTRY_EXPIRATION_DAYS", 365, 1)
 
+        # SQLite maintenance (helps backups by merging WAL back into main DB)
+        # - checkpoint/optimize are typically cheap; VACUUM can be expensive.
+        self.DB_MAINTENANCE_ENABLED = environ.get("DB_MAINTENANCE_ENABLED", "false").lower() == "true"
+        self.DB_MAINTENANCE_INTERVAL_HOURS = self._validate_positive_int("DB_MAINTENANCE_INTERVAL_HOURS", 24, 1)
+        self.DB_WAL_CHECKPOINT_MODE = environ.get("DB_WAL_CHECKPOINT_MODE", "TRUNCATE").strip().upper()
+        self.DB_VACUUM_ENABLED = environ.get("DB_VACUUM_ENABLED", "false").lower() == "true"
+        self.DB_VACUUM_INTERVAL_HOURS = self._validate_positive_int("DB_VACUUM_INTERVAL_HOURS", 168, 1)
+        self.DB_MAINTENANCE_BUSY_TIMEOUT_MS = self._validate_positive_int("DB_MAINTENANCE_BUSY_TIMEOUT_MS", 10000, 1000)
+
         # Batch processing configuration
         self.SAVE_BATCH_SIZE = self._validate_positive_int("SAVE_BATCH_SIZE", 10, 1)
         self.READER_MODE_CONCURRENCY = self._validate_positive_int("READER_MODE_CONCURRENCY", 3, 1)
@@ -210,13 +219,36 @@ class Config:
         # Upper bound on sequential backlog chunks processed per run to prevent starvation
         self.BULLETIN_MAX_CHUNKS = self._validate_positive_int("BULLETIN_MAX_CHUNKS", 5, 1)
         # SimHash merging sensitivity (0 disables merging, higher tolerates more divergence)
+        #
+        # Notes:
+        # - The publisher applies additional guardrails (title/summary token overlap)
+        #   to avoid accidental collisions.
+        # - With a stable merge fingerprint (title + summary) and conservative guardrails,
+        #   a lower threshold tends to reduce false positives.
         try:
-            threshold = int(environ.get("SIMHASH_HAMMING_THRESHOLD", "4"))
+            threshold = int(environ.get("SIMHASH_HAMMING_THRESHOLD", "12"))
         except (ValueError, TypeError):
-            threshold = 4
+            threshold = 12
         if threshold < 0:
             threshold = 0
         self.SIMHASH_HAMMING_THRESHOLD = threshold
+
+        # Optional BM25/FTS5 fallback matching
+        # Conservative defaults: disabled unless explicitly enabled.
+        self.BM25_MERGE_ENABLED = environ.get("BM25_MERGE_ENABLED", "false").strip().lower() == "true"
+        # Require candidate BM25 score to be close to self-score (ratio in [0,1], higher is stronger)
+        try:
+            self.BM25_MERGE_RATIO_THRESHOLD = float(environ.get("BM25_MERGE_RATIO_THRESHOLD", "0.80"))
+        except (ValueError, TypeError):
+            self.BM25_MERGE_RATIO_THRESHOLD = 0.80
+        if self.BM25_MERGE_RATIO_THRESHOLD < 0:
+            self.BM25_MERGE_RATIO_THRESHOLD = 0.0
+        if self.BM25_MERGE_RATIO_THRESHOLD > 1:
+            self.BM25_MERGE_RATIO_THRESHOLD = 1.0
+
+        # Only consider BM25 when SimHash is missing or slightly above threshold.
+        self.BM25_MERGE_MAX_EXTRA_DISTANCE = self._validate_positive_int("BM25_MERGE_MAX_EXTRA_DISTANCE", 6, 0)
+        self.BM25_MERGE_MAX_QUERY_TOKENS = self._validate_positive_int("BM25_MERGE_MAX_QUERY_TOKENS", 8, 1)
 
         # File size limits
         self.SCHEMA_FILE_SIZE_LIMIT_MB = self._validate_positive_int("SCHEMA_FILE_SIZE_LIMIT_MB", 10, 1)

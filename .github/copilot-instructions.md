@@ -15,6 +15,7 @@ There is a `SPEC.md` file that describes the system architecture, components, an
 * You must not resort to inline imports except in very specific cases (e.g., to avoid circular dependencies).
 * You should default to asyncio code where possible.
 * You should prefer a functional coding style (functions in clearly scoped modules) to over-use of classes
+* Avoid nesting function definitions unless absolutely necessary.
 
 ## RSS and Feed Reader Best Practices
 

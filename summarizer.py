@@ -414,16 +414,16 @@ class NewsProcessor:
     @trace_span(
         "summarize_subset",
         tracer_name="summarizer",
-        attr_from_args=lambda self, items_subset, session, url_ids: {"items.count": len(items_subset) if items_subset is not None else 0},
+        attr_from_args=lambda self, items_subset, session, url_ids, title_ids: {"items.count": len(items_subset) if items_subset is not None else 0},
     )
-    async def _summarize_items_subset(self, items_subset: List[Dict[str, Any]], session: ClientSession, url_ids: Dict[int, str]) -> Tuple[str, List[Any], Dict[Any, Tuple[str, str, Optional[int]]]]:
+    async def _summarize_items_subset(self, items_subset: List[Dict[str, Any]], session: ClientSession, url_ids: Dict[int, str], title_ids: Dict[int, str]) -> Tuple[str, List[Any], Dict[Any, Tuple[str, str, Optional[int], Optional[int]]]]:
         """Summarize a subset of items. May raise ContentFilterError. Returns markdown, seen_ids, summaries_dict."""
         prompt_text = self.make_groups_of_key_value_pairs(items_subset)
         json_content = await self.call_azure_openai(prompt_text, session)
         if not json_content:
             return "", [], {}
         try:
-            markdown, seen_ids, summaries_dict = await self.group_by_topic_and_generate_markdown(json_content, url_ids)
+            markdown, seen_ids, summaries_dict = await self.group_by_topic_and_generate_markdown(json_content, url_ids, title_ids)
             return markdown, seen_ids, summaries_dict
         except JSONDecodeError as e:
             logger.warning(f"JSON parsing error on subset of size {len(items_subset)}: {e}")
@@ -432,16 +432,16 @@ class NewsProcessor:
     @trace_span(
         "bisect_summarize",
         tracer_name="summarizer",
-        attr_from_args=lambda self, items_subset, session, url_ids: {"items.count": len(items_subset) if items_subset is not None else 0},
+        attr_from_args=lambda self, items_subset, session, url_ids, title_ids: {"items.count": len(items_subset) if items_subset is not None else 0},
     )
-    async def _bisect_summarize(self, items_subset: List[Dict[str, Any]], session: ClientSession, url_ids: Dict[int, str]) -> Tuple[str, List[Any], Dict[Any, Tuple[str, str, Optional[int]]], List[Any]]:
+    async def _bisect_summarize(self, items_subset: List[Dict[str, Any]], session: ClientSession, url_ids: Dict[int, str], title_ids: Dict[int, str]) -> Tuple[str, List[Any], Dict[Any, Tuple[str, str, Optional[int], Optional[int]]], List[Any]]:
         """Recursively bisect items to avoid content filter. Returns markdown, summarized_ids, summaries_dict, filtered_ids."""
         n = len(items_subset)
         if n == 0:
             return "", [], {}, []
         # Try full subset first
         try:
-            md, ids, sums = await self._summarize_items_subset(items_subset, session, url_ids)
+            md, ids, sums = await self._summarize_items_subset(items_subset, session, url_ids, title_ids)
             if ids:
                 return md, ids, sums, []
             # No ids but no filter: nothing to do
@@ -457,8 +457,8 @@ class NewsProcessor:
             left = items_subset[:mid]
             right = items_subset[mid:]
             # Attributes are covered by decorator and logs
-            md_l, ids_l, sums_l, filt_l = await self._bisect_summarize(left, session, url_ids)
-            md_r, ids_r, sums_r, filt_r = await self._bisect_summarize(right, session, url_ids)
+            md_l, ids_l, sums_l, filt_l = await self._bisect_summarize(left, session, url_ids, title_ids)
+            md_r, ids_r, sums_r, filt_r = await self._bisect_summarize(right, session, url_ids, title_ids)
             # Merge results
             merged_md = "".join([md_l, md_r])
             merged_ids = ids_l + ids_r
@@ -466,7 +466,7 @@ class NewsProcessor:
             merged_filt = filt_l + filt_r
             return merged_md, merged_ids, merged_sums, merged_filt
 
-    async def group_by_topic_and_generate_markdown(self, json_content: str, url_ids: Dict[int, str]) -> Tuple[str, List[Any], Dict[Any, Tuple[str, str, Optional[int]]]]:
+    async def group_by_topic_and_generate_markdown(self, json_content: str, url_ids: Dict[int, str], title_ids: Dict[int, str]) -> Tuple[str, List[Any], Dict[Any, Tuple[str, str, Optional[int], Optional[int]]]]:
         """Parse JSON and generate markdown grouped by topic."""
         try:
             # Log the raw response for debugging
@@ -537,13 +537,21 @@ class NewsProcessor:
                 item['id'] = original_id
                 topics[topic].append(item)
                 
-                # Store the summary text, topic, and simhash fingerprint for database insertion
+                # Store the summary text, topic, and fingerprints for database insertion.
+                # - simhash: legacy/source fingerprint (body preferred)
+                # - merge_simhash: stable merge fingerprint (title + summary)
                 summary_text = item.get('summary', '')
-                simhash_value = compute_simhash(summary_text) if summary_text else None
+                body_text = item.get('body') or ''
+                simhash_source = body_text or summary_text
+                simhash_value = compute_simhash(simhash_source) if simhash_source else None
+                title_text = (title_ids.get(original_id) or '').strip()
+                merge_source = f"{title_text}\n{summary_text}".strip()
+                merge_simhash_value = compute_simhash(merge_source) if merge_source else None
                 summaries_dict[original_id] = (
                     summary_text,
                     topic,
-                    encode_int64(simhash_value) if simhash_value is not None else None,
+                    simhash_value,
+                    merge_simhash_value,
                 )
             
             # Generate markdown
@@ -618,6 +626,7 @@ class NewsProcessor:
                 
             # Store feed IDs and URLs for later reference - use local variable to avoid race conditions
             url_ids = {item['id']: item['url'] for item in items}
+            title_ids = {item['id']: (item.get('title') or '') for item in items}
             feed_title = items[0]['feed_title'] if items else "Summary"
             
             # Prefer README.md for GitHub URLs before formatting
@@ -640,7 +649,7 @@ class NewsProcessor:
                     if json_content:
                         # This can raise JSONDecodeError which we want to retry
                         # Avoid manual span attribute setting; keep logs concise
-                        markdown, seen_ids, summaries_dict = await self.group_by_topic_and_generate_markdown(json_content, url_ids)
+                        markdown, seen_ids, summaries_dict = await self.group_by_topic_and_generate_markdown(json_content, url_ids, title_ids)
                         if markdown and seen_ids:
                             self.generate_summary_feed(markdown, feed_title)
                             # Pass the summaries_dict to store summary text and topics
@@ -659,7 +668,7 @@ class NewsProcessor:
                 except ContentFilterError as cf:
                     # Use bisect strategy to salvage safe items and add placeholders for filtered ones
                     logger.warning(f"Content filter encountered for feed {slug}. Attempting to bisect items to find safe subset.")
-                    md_b, ids_b, sums_b, filtered_ids = await self._bisect_summarize(formatted_items, session, url_ids)
+                    md_b, ids_b, sums_b, filtered_ids = await self._bisect_summarize(formatted_items, session, url_ids, title_ids)
 
                     # Build Safety section for filtered items (placeholders)
                     safety_md = ""

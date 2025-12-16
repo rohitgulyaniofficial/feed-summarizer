@@ -73,11 +73,39 @@ def _run_migrations(conn) -> None:
             cursor.execute("ALTER TABLE summaries ADD COLUMN simhash INTEGER")
             conn.commit()
             logger.info("Migration completed: added simhash column")
+        if 'merge_simhash' not in columns:
+            logger.info("Adding merge_simhash column to summaries table")
+            cursor.execute("ALTER TABLE summaries ADD COLUMN merge_simhash INTEGER")
+            conn.commit()
+            logger.info("Migration completed: added merge_simhash column")
         try:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_summaries_simhash ON summaries(simhash)")
             conn.commit()
         except Exception as e:
             logger.warning(f"Could not create idx_summaries_simhash (may already exist): {e}")
+        try:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_summaries_merge_simhash ON summaries(merge_simhash)")
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"Could not create idx_summaries_merge_simhash (may already exist): {e}")
+
+        # Migration: create FTS5 table for BM25 matching (best-effort)
+        try:
+            cursor.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS summary_fts
+                USING fts5(
+                    title,
+                    summary_text,
+                    topic UNINDEXED,
+                    tokenize='unicode61 remove_diacritics 1'
+                )
+                """
+            )
+            conn.commit()
+        except Exception as e:
+            # Some SQLite builds may not include FTS5.
+            logger.warning(f"FTS5 unavailable or failed to initialize summary_fts: {e}")
         
         # Migration 2: Add bulletins and bulletin_summaries tables if they don't exist
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bulletins'")
@@ -216,6 +244,17 @@ class DatabaseQueue:
         # Connect to database in this thread
         self.conn = connect(self.db_path)
         self.conn.row_factory = Row
+
+        # Enforce WAL mode for better concurrency and predictable backup behavior.
+        # Note: VACUUM/checkpoint may temporarily affect journaling; maintenance restores WAL.
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            self.conn.commit()
+            cursor.close()
+        except Exception as e:
+            logger.warning(f"Could not enforce WAL mode: {e}")
         
         # Initialize tables using external schema
         initialize_database(self.conn)
@@ -287,6 +326,201 @@ class DatabaseQueue:
         finally:
             # Clean up the event to prevent memory leaks
             self.events.pop(operation_id, None)
+
+    def perform_maintenance(
+        self,
+        checkpoint_mode: str = "TRUNCATE",
+        vacuum: bool = False,
+        optimize: bool = True,
+        busy_timeout_ms: int = 10000,
+    ) -> Dict[str, Any]:
+        """Run SQLite maintenance operations on the active connection.
+
+        This is meant to be invoked during idle periods (i.e., when fetch/summarize/publish
+        isn't running) to make backups easier by checkpointing and truncating the WAL.
+
+        Args:
+            checkpoint_mode: One of PASSIVE/FULL/RESTART/TRUNCATE.
+            vacuum: If True, run VACUUM after checkpointing.
+            optimize: If True, run PRAGMA optimize.
+            busy_timeout_ms: SQLite busy timeout in milliseconds for these operations.
+
+        Returns:
+            A dict with best-effort results for checkpoint/optimize/vacuum.
+        """
+        if self.conn is None:
+            raise RuntimeError("Database connection is not initialized")
+
+        mode = str(checkpoint_mode or "TRUNCATE").strip().upper()
+        allowed = {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}
+        if mode not in allowed:
+            mode = "TRUNCATE"
+
+        timeout_ms = 10000
+        try:
+            timeout_ms = int(busy_timeout_ms)
+            if timeout_ms < 1000:
+                timeout_ms = 1000
+        except Exception:
+            timeout_ms = 10000
+
+        cursor = self.conn.cursor()
+        result: Dict[str, Any] = {
+            "checkpoint_mode": mode,
+            "busy_timeout_ms": timeout_ms,
+            "did_optimize": False,
+            "did_vacuum": False,
+            "wal_checkpoint": None,
+        }
+        try:
+            cursor.execute(f"PRAGMA busy_timeout={timeout_ms}")
+
+            # Make sure we're in WAL mode before doing checkpointing.
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+            except Exception:
+                pass
+
+            # Checkpoint & truncate WAL to merge pending writes into the main DB.
+            try:
+                cursor.execute(f"PRAGMA wal_checkpoint({mode})")
+                row = cursor.fetchone()
+                if row is not None:
+                    result["wal_checkpoint"] = tuple(row)
+            except Exception as e:
+                result["wal_checkpoint_error"] = str(e)
+
+            if optimize:
+                try:
+                    cursor.execute("PRAGMA optimize")
+                    result["did_optimize"] = True
+                except Exception as e:
+                    result["optimize_error"] = str(e)
+
+            # Ensure no transaction is open before VACUUM.
+            try:
+                self.conn.commit()
+            except Exception:
+                pass
+
+            if vacuum:
+                try:
+                    cursor.execute("VACUUM")
+                    result["did_vacuum"] = True
+                except Exception as e:
+                    result["vacuum_error"] = str(e)
+
+            # Ensure WAL is active outside maintenance windows.
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+            except Exception as e:
+                result["restore_wal_error"] = str(e)
+
+            try:
+                self.conn.commit()
+            except Exception:
+                pass
+
+            return result
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+    def _fts_available(self, cursor) -> bool:
+        try:
+            row = cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='summary_fts'"
+            ).fetchone()
+            return bool(row)
+        except Exception:
+            return False
+
+    def bm25_candidates(
+        self,
+        query_id: int,
+        query_text: str,
+        topic: Optional[str],
+        candidate_ids: List[int],
+        limit: int = 10,
+    ) -> Dict[str, Any]:
+        """Return BM25 scores for candidate summaries using SQLite FTS5.
+
+        Returns a dict:
+          {
+            "self_score": float|None,
+            "candidates": [{"id": int, "score": float}, ...]
+          }
+        """
+        if not candidate_ids:
+            return {"self_score": None, "candidates": []}
+        if self.conn is None:
+            return {"self_score": None, "candidates": []}
+
+        cursor = self.conn.cursor()
+        try:
+            if not self._fts_available(cursor):
+                return {"self_score": None, "candidates": []}
+
+            q = (query_text or "").strip()
+            if not q:
+                return {"self_score": None, "candidates": []}
+
+            topic_norm = None
+            if isinstance(topic, str):
+                tn = topic.strip()
+                topic_norm = tn if tn else None
+
+            # Self-score normalization (best-effort)
+            self_row = cursor.execute(
+                "SELECT bm25(summary_fts) AS score FROM summary_fts WHERE rowid = ? AND summary_fts MATCH ?",
+                (int(query_id), q),
+            ).fetchone()
+            self_score = None
+            if self_row and self_row[0] is not None:
+                try:
+                    self_score = float(self_row[0])
+                except Exception:
+                    self_score = None
+
+            placeholders = ",".join(["?"] * len(candidate_ids))
+
+            if topic_norm is None:
+                sql = f"""
+                    SELECT rowid AS id, bm25(summary_fts) AS score
+                    FROM summary_fts
+                    WHERE summary_fts MATCH ?
+                      AND rowid IN ({placeholders})
+                    ORDER BY score
+                    LIMIT ?
+                """
+                params = [q, *[int(x) for x in candidate_ids], int(limit)]
+            else:
+                sql = f"""
+                    SELECT rowid AS id, bm25(summary_fts) AS score
+                    FROM summary_fts
+                    WHERE summary_fts MATCH ?
+                      AND topic = ?
+                      AND rowid IN ({placeholders})
+                    ORDER BY score
+                    LIMIT ?
+                """
+                params = [q, topic_norm, *[int(x) for x in candidate_ids], int(limit)]
+
+            rows = cursor.execute(sql, params).fetchall()
+            out = []
+            for r in rows:
+                try:
+                    out.append({"id": int(r[0]), "score": float(r[1])})
+                except Exception:
+                    continue
+            return {"self_score": self_score, "candidates": out}
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
     
     # Feed Management Operations
     def register_feed(self, slug: str, url: str) -> bool:
@@ -617,6 +851,7 @@ class DatabaseQueue:
                         s.summary_text,
                         s.topic,
                         s.simhash,
+                        s.merge_simhash,
                         s.generated_date,
                         s.published_date,
                         i.title as item_title,
@@ -647,7 +882,8 @@ class DatabaseQueue:
                             'id': row['id'],
                             'summary_text': row['summary_text'],
                             'topic': row['topic'],
-                                'simhash': decode_int64(row['simhash']),
+                            'simhash': decode_int64(row['simhash']),
+                            'merge_simhash': decode_int64(row['merge_simhash']),
                             'generated_date': row['generated_date'],
                             'published_date': row['published_date'],
                             'item_title': row['item_title'],
@@ -737,6 +973,7 @@ class DatabaseQueue:
                         s.summary_text,
                         s.topic,
                         s.simhash,
+                        s.merge_simhash,
                         s.generated_date,
                         s.published_date,
                         i.title as item_title,
@@ -766,6 +1003,7 @@ class DatabaseQueue:
                         'summary_text': row['summary_text'],
                         'topic': row['topic'],
                         'simhash': decode_int64(row['simhash']),
+                        'merge_simhash': decode_int64(row['merge_simhash']),
                         'generated_date': row['generated_date'],
                         'published_date': row['published_date'],
                         'item_title': row['item_title'],
@@ -817,6 +1055,7 @@ class DatabaseQueue:
                         s.summary_text,
                         s.topic,
                         s.simhash,
+                        s.merge_simhash,
                         s.generated_date,
                         s.published_date,
                         i.title as item_title,
@@ -846,6 +1085,7 @@ class DatabaseQueue:
                         'summary_text': row['summary_text'],
                         'topic': row['topic'],
                         'simhash': decode_int64(row['simhash']),
+                        'merge_simhash': decode_int64(row['merge_simhash']),
                         'generated_date': row['generated_date'],
                         'published_date': row['published_date'],
                         'item_title': row['item_title'],
@@ -1098,22 +1338,56 @@ class DatabaseQueue:
                 logger.warning(f"None of the provided IDs {ids} exist in the items table")
                 return 0
             
+            # Fetch titles once (needed for FTS maintenance)
+            title_map: Dict[int, str] = {}
+            try:
+                title_rows = cursor.execute(
+                    f"SELECT id, title FROM items WHERE id IN ({placeholders})",
+                    ids,
+                ).fetchall()
+                for row in title_rows:
+                    try:
+                        title_map[int(row[0])] = str(row[1] or "")
+                    except Exception:
+                        continue
+            except Exception:
+                title_map = {}
+
             # Insert summaries for existing IDs
             insert_count = 0
             for item_id in existing_ids:
                 summary_info = summaries.get(item_id)
                 if summary_info:
-                    if len(summary_info) == 3:
+                    simhash = None
+                    merge_simhash = None
+                    if len(summary_info) == 4:
+                        summary_text, topic, simhash, merge_simhash = summary_info  # type: ignore[misc]
+                    elif len(summary_info) == 3:
                         summary_text, topic, simhash = summary_info
                     else:
                         summary_text, topic = summary_info  # type: ignore[misc]
-                        simhash = None
-                    simhash = encode_int64(simhash)
+
+                    simhash_db = encode_int64(simhash)
+                    merge_simhash_db = encode_int64(merge_simhash)
                     try:
                         cursor.execute("""
-                            INSERT OR REPLACE INTO summaries (id, summary_text, topic, generated_date, simhash)
-                            VALUES (?, ?, ?, ?, ?)
-                        """, (item_id, summary_text, topic, int(time()), simhash))
+                            INSERT OR REPLACE INTO summaries (id, summary_text, topic, generated_date, simhash, merge_simhash)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (item_id, summary_text, topic, int(time()), simhash_db, merge_simhash_db))
+
+                        # Best-effort FTS upsert (if available)
+                        try:
+                            cursor.execute(
+                                """
+                                INSERT OR REPLACE INTO summary_fts(rowid, title, summary_text, topic)
+                                VALUES(?, ?, ?, ?)
+                                """,
+                                (item_id, title_map.get(item_id, ""), summary_text, topic),
+                            )
+                        except Exception:
+                            # FTS is optional; ignore if unavailable.
+                            pass
+
                         insert_count += 1
                     except Error as e:
                         logger.error(f"Error inserting summary for item {item_id}: {e}")
@@ -1347,6 +1621,7 @@ class DatabaseQueue:
                 SELECT 
                     s.id, s.summary_text, s.topic, s.generated_date, s.published_date,
                     s.simhash,
+                    s.merge_simhash,
                     i.title as item_title, i.url as item_url, i.date as item_date,
                     f.title as feed_title, f.slug as feed_slug
                 FROM bulletin_summaries bs
@@ -1367,6 +1642,7 @@ class DatabaseQueue:
                     'summary_text': row['summary_text'],
                     'topic': row['topic'],
                     'simhash': decode_int64(row['simhash']),
+                    'merge_simhash': decode_int64(row['merge_simhash']),
                     'generated_date': row['generated_date'],
                     'published_date': row['published_date'],
                     'item_title': row['item_title'],

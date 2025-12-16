@@ -65,6 +65,12 @@
             line-height: 1.6;
             margin-bottom: 10px;
         }
+        .summary-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
         .summary-meta {
             display: flex;
             justify-content: space-between;
@@ -111,12 +117,19 @@
         {% for summary in topic_summaries %}
         <div class="summary-item">
             <div class="summary-text">{{ summary.summary_text }}</div>
-            <div class="summary-meta">
-                {% if summary.item_url %}
-                <a href="{{ summary.item_url }}" class="summary-link" target="_blank">{{ summary.item_title or 'Read more' }}</a>
+            <div class="summary-links">
+                {% if summary.merged_links %}
+                    {% for link in summary.merged_links %}
+                        <a href="{{ link.url }}" class="summary-link" target="_blank">{{ link.title or ('Link ' ~ loop.index) }}</a>
+                    {% endfor %}
+                {% elif summary.item_url %}
+                    <a href="{{ summary.item_url }}" class="summary-link" target="_blank">{{ summary.item_title or 'Read more' }}</a>
                 {% endif %}
+            </div>
+            <div class="summary-meta">
                 <span class="summary-date">
                     {% if summary.feed_slug %}Source: {{ summary.feed_slug }}{% endif %}
+                    {% if summary.merged_count and summary.merged_count > 1 %} • {{ summary.merged_count }} related sources{% endif %}
                     {% if summary.item_date %} • Published: {{ summary.item_date.strftime('%B %d, %Y') }}{% endif %}
                 </span>
             </div>

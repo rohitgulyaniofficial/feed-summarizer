@@ -7,7 +7,7 @@ defined in feeds.yaml. Each RSS item represents a bulletin containing summaries
 published within a 4-hour time window, with AI-generated introductions.
 """
 
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -32,7 +32,7 @@ from config import config, get_logger
 from telemetry import init_telemetry, get_tracer, trace_span
 from llm_client import chat_completion as ai_chat_completion
 from models import DatabaseQueue
-from utils import hamming_distance
+from utils import compute_simhash, hamming_distance
 
 # Module-specific logger
 logger = get_logger("publisher")
@@ -264,10 +264,14 @@ class RSSPublisher:
     
     def _create_raw_rss(self, slug: str, feed_title: str, items: List[Dict[str, Any]]) -> str:
         """Create an RSS feed for raw items of a specific feed slug (feedgen).
-        
+
         Note: feedgen writes items in the order they are added via add_item().
         We want newest items first in the RSS output (reverse chronological).
         Items should be passed in oldest-first order so feedgen outputs them properly.
+
+        lastBuildDate is set from the most recent item timestamp when
+        available so that feeds remain byte-identical across no-op runs,
+        enabling MD5-based upload skipping.
         """
         fg = FeedGenerator()
         fg.id(self._sanitize_xml_string(f"{self.base_url}/feeds/raw/{slug}.xml"))
@@ -277,7 +281,21 @@ class RSSPublisher:
         fg.description(self._sanitize_xml_string(f"Passthrough feed for {slug}"))
         fg.language('en-us')
         fg.generator('Feed Summarizer Passthrough')
-        fg.lastBuildDate(datetime.now(timezone.utc))
+
+        # Derive lastBuildDate from the most recent item timestamp when
+        # possible to avoid spurious changes on no-op runs.
+        latest_ts: Optional[int] = None
+        try:
+            timestamps = [int(it.get('date')) for it in items if it.get('date') is not None]
+            if timestamps:
+                latest_ts = max(timestamps)
+        except Exception:
+            latest_ts = None
+
+        if latest_ts is not None:
+            fg.lastBuildDate(datetime.fromtimestamp(latest_ts, tz=timezone.utc))
+        else:
+            fg.lastBuildDate(datetime.now(timezone.utc))
 
         for it in items:
             try:
@@ -621,9 +639,65 @@ class RSSPublisher:
                 return fallback_text
             parsed = json.loads(response)
             if isinstance(parsed, list) and parsed:
-                merged_summary = parsed[0].get('summary')
-                if merged_summary:
-                    return merged_summary.strip()
+                expected_ids: Set[int] = set()
+                for member in group:
+                    try:
+                        expected_ids.add(int(member.get('id')))
+                    except Exception:
+                        continue
+
+                best_summary: Optional[str] = None
+                best_overlap = -1
+                best_exact = False
+                best_size = -1
+
+                for entry in parsed:
+                    if not isinstance(entry, dict):
+                        continue
+                    summary_text = entry.get('summary')
+                    ids_val = entry.get('ids')
+                    if not isinstance(summary_text, str) or not summary_text.strip():
+                        continue
+                    if not isinstance(ids_val, list) or not ids_val:
+                        continue
+
+                    ids_set: Set[int] = set()
+                    for raw_id in ids_val:
+                        try:
+                            ids_set.add(int(raw_id))
+                        except Exception:
+                            continue
+
+                    if not ids_set:
+                        continue
+
+                    overlap = len(ids_set & expected_ids) if expected_ids else 0
+                    exact = bool(expected_ids) and (ids_set == expected_ids)
+                    size = len(ids_set)
+
+                    # Prefer exact/full coverage, then highest overlap, then largest group.
+                    if exact and not best_exact:
+                        best_exact = True
+                        best_overlap = overlap
+                        best_size = size
+                        best_summary = summary_text.strip()
+                        continue
+
+                    if exact == best_exact:
+                        if overlap > best_overlap or (overlap == best_overlap and size > best_size):
+                            best_overlap = overlap
+                            best_size = size
+                            best_summary = summary_text.strip()
+
+                if best_summary:
+                    if expected_ids and best_overlap < len(expected_ids):
+                        logger.warning(
+                            "similar_merge returned partial ID coverage (expected=%s overlap=%d/%d)",
+                            sorted(expected_ids),
+                            best_overlap,
+                            len(expected_ids),
+                        )
+                    return best_summary
         except Exception as exc:
             ids = [member.get('id') for member in group]
             logger.warning("similar_merge prompt failed for ids %s: %s", ids, exc)
@@ -652,15 +726,156 @@ class RSSPublisher:
             return 'General'
         return Counter(topics).most_common(1)[0][0]
 
+    def _title_token_set(self, summary: Dict[str, Any]) -> Set[str]:
+        """Extract a normalized set of significant tokens from a summary title."""
+        raw = (
+            summary.get('item_title')
+            or summary.get('title')
+            or ''
+        )
+        text = str(raw).lower()
+        tokens = re.findall(r"[a-z0-9]+", text)
+        if not tokens:
+            return set()
+        stopwords = {
+            'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by',
+            'for', 'from', 'has', 'have', 'he', 'her', 'his', 'i',
+            'in', 'is', 'it', 'its', 'of', 'on', 'or', 'our', 's',
+            'she', 'so', 'that', 'the', 'their', 'they', 'this', 'to',
+            'was', 'we', 'were', 'will', 'with', 'you',
+        }
+        # Keep only meaningful tokens to reduce accidental overlaps
+        return {t for t in tokens if len(t) >= 3 and t not in stopwords}
+
+    def _summary_token_set(self, summary: Dict[str, Any]) -> Set[str]:
+        """Extract a normalized set of significant tokens from the summary text."""
+        raw = summary.get('summary_text') or ''
+        text = str(raw).lower()
+        tokens = re.findall(r"[a-z0-9]+", text)
+        if not tokens:
+            return set()
+        stopwords = {
+            'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by',
+            'for', 'from', 'has', 'have', 'he', 'her', 'his', 'i',
+            'in', 'is', 'it', 'its', 'of', 'on', 'or', 'our', 's',
+            'she', 'so', 'that', 'the', 'their', 'they', 'this', 'to',
+            'was', 'we', 'were', 'will', 'with', 'you',
+            'new', 'news', 'report', 'reports', 'reported', 'update', 'updates',
+            'today', 'yesterday', 'tomorrow',
+        }
+        return {t for t in tokens if len(t) >= 3 and t not in stopwords}
+
+    def _is_high_signal_token(self, token: str) -> bool:
+        """Heuristic for tokens that are likely to be proper nouns/brands."""
+        if not token:
+            return False
+        if len(token) >= 8:
+            return True
+        # Short-but-distinct tokens (e.g., "openai", "nsfw")
+        if len(token) >= 5 and any(ch.isdigit() for ch in token):
+            return True
+        return False
+
+    def _bm25_match_query(self, summary: Dict[str, Any], max_tokens: int) -> str:
+        """Build a conservative FTS5 MATCH query from title+summary tokens.
+
+        We use OR + prefix matching to tolerate minor inflections, then rely on
+        ratio normalization + mutual agreement to stay conservative.
+        """
+        max_n = 8
+        try:
+            max_n = int(max_tokens)
+        except Exception:
+            max_n = 8
+        if max_n <= 0:
+            max_n = 8
+
+        title_tokens = list(self._title_token_set(summary))
+        summary_tokens = list(self._summary_token_set(summary))
+        tokens = set(title_tokens + summary_tokens)
+        if not tokens:
+            return ""
+
+        # Prefer longer/high-signal tokens to reduce boilerplate matches.
+        ranked = sorted(tokens, key=lambda t: (len(t), t), reverse=True)
+        ranked = ranked[:max_n]
+        # FTS5 prefix query: token*
+        parts = [f"{t}*" for t in ranked if t]
+        return " OR ".join(parts)
+
+    def _should_merge_pair(self, a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+        """Cheap guardrails to reduce accidental simhash collisions.
+
+        We only consider merging when:
+        - Titles share enough significant tokens (prevents unrelated merges)
+
+        Topic is not used as an elimination criterion because upstream
+        classification can be wrong.
+        """
+        title_tokens_a = self._title_token_set(a)
+        title_tokens_b = self._title_token_set(b)
+        title_shared = title_tokens_a & title_tokens_b
+        if len(title_shared) >= 2:
+            return True
+
+        summary_tokens_a = self._summary_token_set(a)
+        summary_tokens_b = self._summary_token_set(b)
+        summary_shared = summary_tokens_a & summary_tokens_b
+        if len(summary_shared) >= 3:
+            return True
+
+        # Allow a single shared high-signal title token (e.g., a brand/proper noun)
+        if len(title_shared) == 1:
+            token = next(iter(title_shared))
+            return self._is_high_signal_token(token)
+
+        return False
+
+    def _merge_fingerprint(self, summary: Dict[str, Any]) -> Optional[int]:
+        """Compute a fingerprint used for merging.
+
+        Use both title and summary text to reduce cases where different feeds
+        summarize the same story using different phrasing.
+
+        Prefer the stored `merge_simhash` when present.
+        Falls back to computing from title + summary text, then to legacy `simhash`.
+        """
+        existing_merge = summary.get('merge_simhash')
+        if isinstance(existing_merge, int):
+            return existing_merge
+        title = (summary.get('item_title') or summary.get('title') or '')
+        body = (summary.get('summary_text') or '')
+        combined = f"{title}\n{body}".strip()
+        fp = compute_simhash(combined)
+        if isinstance(fp, int):
+            return fp
+        existing = summary.get('simhash')
+        return existing if isinstance(existing, int) else None
+
     async def _merge_similar_summaries(self, summaries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Merge highly similar summaries using SimHash + optional LLM prompt."""
         threshold = max(0, int(getattr(config, 'SIMHASH_HAMMING_THRESHOLD', 0) or 0))
         if threshold <= 0 or not summaries:
             return summaries
 
-        candidates = [s for s in summaries if isinstance(s.get('simhash'), int) and isinstance(s.get('id'), (int, str))]
+        # Pre-compute merge fingerprints so we can use a stronger signal than summary-only simhash.
+        for s in summaries:
+            try:
+                s['_merge_fp'] = self._merge_fingerprint(s)
+            except Exception:
+                s['_merge_fp'] = None
+
+        candidates = [
+            s for s in summaries
+            if isinstance(s.get('_merge_fp'), int) and isinstance(s.get('id'), (int, str))
+        ]
         if len(candidates) < 2:
             return summaries
+
+        bm25_enabled = bool(getattr(config, 'BM25_MERGE_ENABLED', False))
+        bm25_ratio_threshold = float(getattr(config, 'BM25_MERGE_RATIO_THRESHOLD', 0.80) or 0.80)
+        bm25_max_extra = int(getattr(config, 'BM25_MERGE_MAX_EXTRA_DISTANCE', 6) or 6)
+        bm25_max_tokens = int(getattr(config, 'BM25_MERGE_MAX_QUERY_TOKENS', 8) or 8)
 
         # Union-find setup keyed by summary ID (as int)
         def _as_int(value: Any) -> Optional[int]:
@@ -696,16 +911,89 @@ class RSSPublisher:
             else:
                 parent[root_a] = root_b
 
+        # Optional: precompute BM25 ratios per summary, scoped to current candidates.
+        bm25_ratios: Dict[int, Dict[int, float]] = {}
+        if bm25_enabled and self.db is not None:
+            id_to_summary: Dict[int, Dict[str, Any]] = {}
+            candidate_ids_all: List[int] = []
+            for s in candidates:
+                sid = _as_int(s.get('id'))
+                if sid is None:
+                    continue
+                id_to_summary[sid] = s
+                candidate_ids_all.append(sid)
+
+            if len(candidate_ids_all) >= 2:
+                for sid in candidate_ids_all:
+                    s = id_to_summary.get(sid)
+                    if not s:
+                        continue
+                    query = self._bm25_match_query(s, bm25_max_tokens)
+                    if not query:
+                        continue
+                    candidate_ids = [x for x in candidate_ids_all if x != sid]
+                    try:
+                        resp = await self.db.execute(
+                            'bm25_candidates',
+                            query_id=sid,
+                            query_text=query,
+                            topic=None,
+                            candidate_ids=candidate_ids,
+                            limit=10,
+                        )
+                    except Exception:
+                        continue
+
+                    self_score = None
+                    try:
+                        self_score = resp.get('self_score') if isinstance(resp, dict) else None
+                    except Exception:
+                        self_score = None
+                    if not isinstance(self_score, (int, float)) or self_score == 0:
+                        continue
+
+                    denom = abs(float(self_score))
+                    if denom <= 0:
+                        continue
+
+                    out: Dict[int, float] = {}
+                    for row in (resp.get('candidates') or []) if isinstance(resp, dict) else []:
+                        try:
+                            cid = int(row.get('id'))
+                            score = float(row.get('score'))
+                        except Exception:
+                            continue
+                        ratio = abs(score) / denom
+                        if ratio > 1:
+                            ratio = 1.0
+                        out[cid] = ratio
+                    if out:
+                        bm25_ratios[sid] = out
+
         for i in range(len(candidates)):
             for j in range(i + 1, len(candidates)):
                 first = candidates[i]
                 second = candidates[j]
+                if not self._should_merge_pair(first, second):
+                    continue
                 sid_a = _as_int(first.get('id'))
                 sid_b = _as_int(second.get('id'))
                 if sid_a is None or sid_b is None:
                     continue
-                dist = hamming_distance(first.get('simhash'), second.get('simhash'))
+                dist = hamming_distance(first.get('_merge_fp'), second.get('_merge_fp'))
                 if dist is not None and dist <= threshold:
+                    union(sid_a, sid_b)
+                    continue
+
+                # BM25 fallback: only when enabled and SimHash is missing or slightly above threshold.
+                if not bm25_enabled:
+                    continue
+                if dist is not None and dist > (threshold + max(0, bm25_max_extra)):
+                    continue
+
+                ra = bm25_ratios.get(sid_a, {}).get(sid_b, 0.0)
+                rb = bm25_ratios.get(sid_b, {}).get(sid_a, 0.0)
+                if ra >= bm25_ratio_threshold and rb >= bm25_ratio_threshold:
                     union(sid_a, sid_b)
 
         cluster_map: Dict[int, List[Dict[str, Any]]] = {}
@@ -1032,7 +1320,25 @@ class RSSPublisher:
         fg.description(f"News bulletins for {group_name} topics, featuring AI-generated summaries from multiple sources, updated every 4 hours.")
         fg.language('en-us')
         fg.generator('Feed Summarizer RSS Publisher')
-        fg.lastBuildDate(datetime.now(timezone.utc))
+
+        # Set lastBuildDate from the most recent summary publication time so
+        # that feeds do not change on runs where no new bulletins are added.
+        latest_ts: Optional[int] = None
+        try:
+            for summaries in bulletins.values():
+                for s in summaries:
+                    ts = s.get('published_date')
+                    if ts:
+                        its = int(ts)
+                        if latest_ts is None or its > latest_ts:
+                            latest_ts = its
+        except Exception:
+            latest_ts = None
+
+        if latest_ts is not None:
+            fg.lastBuildDate(datetime.fromtimestamp(latest_ts, tz=timezone.utc))
+        else:
+            fg.lastBuildDate(datetime.now(timezone.utc))
 
         # Items per bulletin session
         for session_key in sorted(bulletins.keys(), reverse=True):

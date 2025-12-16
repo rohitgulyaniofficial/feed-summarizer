@@ -76,12 +76,16 @@ CREATE TABLE IF NOT EXISTS items (
 --   topic          AI-assigned topic / category label
 --   generated_date Epoch seconds when summarization completed
 --   published_date Epoch seconds when first published (HTML/RSS). NULL until published.
+--   simhash        64-bit fingerprint for similarity grouping / deduplication
+--   merge_simhash  64-bit fingerprint for merging (normalized title + summary)
 CREATE TABLE IF NOT EXISTS summaries (
     id INTEGER PRIMARY KEY,
     summary_text TEXT,           -- AI summary (may be NULL if generation failed)
     topic TEXT,                  -- Classification label
     generated_date INTEGER,      -- UTC epoch seconds summary created
     published_date INTEGER,      -- UTC epoch seconds first published (NULL = pending)
+    simhash INTEGER,             -- Lightweight fingerprint used for merging similar items
+    merge_simhash INTEGER,        -- Fingerprint used specifically for publisher-side merging
     FOREIGN KEY (id) REFERENCES items(id)
 );
 
@@ -147,6 +151,21 @@ CREATE INDEX IF NOT EXISTS idx_summaries_published_date ON summaries(published_d
 CREATE INDEX IF NOT EXISTS idx_summaries_topic_published ON summaries(topic, published_date);
 CREATE INDEX IF NOT EXISTS idx_summaries_published_not_null ON summaries(published_date) WHERE published_date IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_summaries_published_null ON summaries(id) WHERE published_date IS NULL;
+CREATE INDEX IF NOT EXISTS idx_summaries_simhash ON summaries(simhash);
+CREATE INDEX IF NOT EXISTS idx_summaries_merge_simhash ON summaries(merge_simhash);
+
+-- ---------------------------------------------------------------------------
+-- Full-Text Search (FTS5)
+-- Optional: used for BM25-based similarity checks to complement SimHash.
+-- Kept separate from canonical tables; rowid maps to summaries.id.
+-- ---------------------------------------------------------------------------
+CREATE VIRTUAL TABLE IF NOT EXISTS summary_fts
+USING fts5(
+    title,
+    summary_text,
+    topic UNINDEXED,
+    tokenize='unicode61 remove_diacritics 1'
+);
 
 -- Bulletins table indexes
 CREATE INDEX IF NOT EXISTS idx_bulletins_group_name ON bulletins(group_name);

@@ -12,18 +12,32 @@ It is also deployable as a Docker Swarm service using `kata`, a private helper t
 
 ## Contents
 
-1. Quickstart (5 commands)
-2. Features
+1. Features
+2. Quickstart (5 commands)
 3. Architecture (high‑level)
 4. Configuration & Environment
 5. Running (one‑shot vs scheduled vs step modes)
 6. Publishing Outputs (HTML / RSS / passthrough / Azure)
-7. Age Window & Retention
-8. Telemetry (opt‑out / service naming)
-9. Troubleshooting
+7. Telemetry (opt‑out / service naming)
+8. Troubleshooting
+9. Age Window & Retention
 10. Roadmap Snapshot
 
-## 1. Quickstart (5 commands)
+## 1. Features
+
+- Concurrent conditional feed fetching (ETag / Last-Modified; respectful backoff & error tracking)
+- Optional reader mode & GitHub README enrichment for richer summarization context
+- AI summarization with per‑group introductions (opt‑in) via Azure OpenAI
+- Topic/group bulletins rendered as responsive HTML + RSS 2.0 feeds
+- SimHash-powered dedupe (optional BM25/FTS5 fallback) merges near-duplicate summaries and surfaces every source link
+- Optional passthrough (raw) feeds with minimal processing
+- Smart time‑based scheduling (timezone aware) plus interval overrides
+- Azure Blob Storage upload with MD5 de‑dup (skip unchanged) & optional sync delete
+- Graceful shutdown with executor timeouts and robust logging
+- Config hot‑reload for feeds; caching of YAML & prompt data
+- Observability hooks via OpenTelemetry (HTTP, DB, custom spans)
+
+## 2. Quickstart (5 commands)
 
 ```bash
 python -m venv .venv              # 1. Create virtualenv
@@ -34,20 +48,6 @@ python main.py run                # 5. One full pipeline run (fetch→summarize�
 ```
 
 (*) Azure upload happens only if storage env vars are set; otherwise it is skipped automatically.
-
-## 2. Features
-
-- Concurrent conditional feed fetching (ETag / Last-Modified; respectful backoff & error tracking)
-- Optional reader mode & GitHub README enrichment for richer summarization context
-- AI summarization with per‑group introductions (opt‑in) via Azure OpenAI
-- Topic/group bulletins rendered as responsive HTML + RSS 2.0 feeds
-- SimHash-powered dedupe merges near-duplicate summaries and surfaces every source link
-- Optional passthrough (raw) feeds with minimal processing
-- Smart time‑based scheduling (timezone aware) plus interval overrides
-- Azure Blob Storage upload with MD5 de‑dup (skip unchanged) & optional sync delete
-- Graceful shutdown with executor timeouts and robust logging
-- Config hot‑reload for feeds; caching of YAML & prompt data
-- Observability hooks via OpenTelemetry (HTTP, DB, custom spans)
 
 ## 3. Architecture (High‑Level)
 
@@ -84,27 +84,59 @@ Essential environment variables:
 
 Variable | Purpose | Notes
 ---------|---------|------
-AZURE_ENDPOINT | Azure OpenAI endpoint host (no scheme) | Auto-normalized (strip https://)
-OPENAI_API_KEY | Azure OpenAI API key | Required for summaries
-DEPLOYMENT_NAME | Model deployment (e.g. `gpt-4o-mini`) | Default: `gpt-4o-mini`
-RSS_BASE_URL | Public base URL for generated links | Affects GUID/self links
-DATABASE_PATH | SQLite path | Default: feeds.db
-PUBLIC_DIR | Output directory root | Default: ./public
-AZURE_STORAGE_ACCOUNT | Blob storage account | Optional
-AZURE_STORAGE_KEY | Blob storage key | Optional
-AZURE_UPLOAD_SYNC_DELETE | Delete remote orphans | Default: false (danger when true)
-FETCH_INTERVAL_MINUTES | Base interval fallback | Default: 30
-SCHEDULER_TIMEZONE | Override schedule TZ if not in feeds.yaml | Default: UTC
-MAX_ITEMS_PER_FEED | Per-feed physical retention cap | Default: 400
-SUMMARY_WINDOW_ITEMS | Unsummarized items per feed per summarizer pass | Default: 50
-BULLETIN_SUMMARY_LIMIT | Summaries per HTML bulletin chunk | Default: 100
-BULLETIN_PER_FEED_LIMIT | Max summaries a single feed can contribute to one chunk | Default: 40 (auto-reduced if many feeds)
-BULLETIN_MAX_CHUNKS | Backlog chunks processed per run | Default: 5
-`SIMHASH_HAMMING_THRESHOLD` | Max Hamming distance (0-64) for merging summaries | Default: 4 (set 0 to disable)
-LOG_LEVEL | DEBUG / INFO / WARNING / ERROR | Default: INFO
-DISABLE_TELEMETRY | Set true to disable all tracing/log export | Default: false
+`AZURE_ENDPOINT` | Azure OpenAI endpoint host (no scheme) | Auto-normalized (strip https://)
+`OPENAI_API_KEY` | Azure OpenAI API key | Required for summaries
+`DEPLOYMENT_NAME` | Model deployment (e.g. `gpt-4o-mini`) | Default: `gpt-4o-mini`
+`RSS_BASE_URL` | Public base URL for generated links | Affects GUID/self links
+`DATABASE_PATH` | SQLite path | Default: feeds.db
+`PUBLIC_DIR` | Output directory root | Default: ./public
+`AZURE_STORAGE_ACCOUNT` | Blob storage account | Optional
+`AZURE_STORAGE_KEY` | Blob storage key | Optional
+`AZURE_UPLOAD_SYNC_DELETE` | Delete remote orphans | Default: false (danger when true)
+`FETCH_INTERVAL_MINUTES` | Base interval fallback | Default: 30
+`SCHEDULER_TIMEZONE` | Override schedule TZ if not in feeds.yaml | Default: UTC
+`MAX_ITEMS_PER_FEED` | Per-feed physical retention cap | Default: 400
+`SUMMARY_WINDOW_ITEMS` | Unsummarized items per feed per summarizer pass | Default: 50
+`BULLETIN_SUMMARY_LIMIT` | Summaries per HTML bulletin chunk | Default: 100
+`BULLETIN_PER_FEED_LIMIT` | Max summaries a single feed can contribute to one chunk | Default: 40 (auto-reduced if many feeds)
+`BULLETIN_MAX_CHUNKS` | Backlog chunks processed per run | Default: 5
+`SIMHASH_HAMMING_THRESHOLD` | Max Hamming distance (0-64) for merging summaries | Default: 12 (set 0 to disable)
+`BM25_MERGE_ENABLED` | Enable BM25/FTS5 merge fallback | Default: false
+`BM25_MERGE_RATIO_THRESHOLD` | Minimum mutual BM25 ratio to accept a merge | Default: 0.80
+`BM25_MERGE_MAX_EXTRA_DISTANCE` | Allow BM25 to merge beyond SimHash threshold by this many bits | Default: 6
+`BM25_MERGE_MAX_QUERY_TOKENS` | Cap tokens used in BM25 queries | Default: 8
+`LOG_LEVEL` | DEBUG / INFO / WARNING / ERROR | Default: INFO
+`DISABLE_TELEMETRY` | Set true to disable all tracing/log export | Default: false
 
 `secrets.yaml` may be either a top-level mapping or nested under `environment:`. Both are parsed and override `.env` and process env values.
+
+### Dedupe & Merge Tuning (SimHash + optional BM25)
+
+This project attempts to merge near-duplicate summaries when generating bulletins/feeds.
+
+- **SimHash** is the primary signal: two summaries merge when their merge fingerprints are within `SIMHASH_HAMMING_THRESHOLD` bits.
+- **Topic is not a merge veto**: mis-filed topics are allowed to merge; topics are primarily used for grouping/presentation.
+- **BM25/FTS5 fallback (optional):** when enabled, the publisher can use SQLite FTS5 BM25 scoring as a conservative fallback to merge textually identical stories that fall outside the strict SimHash threshold.
+  - BM25 only applies if FTS is available and `summary_fts` exists.
+  - On older databases, `summary_fts` may exist but be empty; run the backfill tool once (see below).
+
+Example Docker/Kata settings:
+
+```yaml
+SIMHASH_HAMMING_THRESHOLD: 24
+BM25_MERGE_ENABLED: "true"
+BM25_MERGE_MAX_EXTRA_DISTANCE: "16"
+```
+
+Diagnostics:
+
+- `tools/merge_report.py` prints both SimHash and BM25 decisions (when enabled) for a keyword across recent bulletins.
+  - Example: `python3 tools/merge_report.py --hours 96 --threshold 24 --query Cloudflare`
+
+FTS backfill (one-time, for existing DBs):
+
+- `tools/fts_backfill.py` can populate `summary_fts` from historical rows so BM25 works immediately.
+  - Example: `python3 tools/fts_backfill.py --db /data/feeds.db`
 
 ## 5. Running
 
@@ -157,7 +189,30 @@ Azure Upload:
 - Set `AZURE_UPLOAD_SYNC_DELETE=true` to purge remote files not present locally.
 - Upload step computes MD5 to skip unchanged blobs.
 
-## 7. Age Window & Retention
+## 7. Telemetry
+
+Feature | How
+--------|-----
+Disable all telemetry | `DISABLE_TELEMETRY=true`
+Service name override | `OTEL_SERVICE_NAME=feed-summarizer-prod`
+Environment tag | `OTEL_ENVIRONMENT=production`
+Azure exporter | Provide `APPLICATIONINSIGHTS_CONNECTION_STRING` (or legacy instrumentation key)
+
+If no connection string, spans stay in-process (no console spam). Logs can also be exported when Azure exporter is available.
+
+## 8. Troubleshooting
+
+Symptom | Cause | Fix
+--------|-------|----
+Empty summaries | Missing / bad Azure config | Check endpoint host (no scheme), key, deployment
+Few bulletin items | Items filtered / no new content | Verify fetcher logs & summary successes
+Broken feed links | Wrong `RSS_BASE_URL` | Set correct public domain before publishing
+Slow summarization | Rate limit / large content | Adjust `SUMMARIZER_REQUESTS_PER_MINUTE` / enable reader mode selectively
+Missing Azure upload | Vars unset | Provide storage account + key or run without upload
+Telemetry missing | Disabled or no exporter | Remove `DISABLE_TELEMETRY` / set connection string
+Empty summaries with token usage | New structured response format returned parts list | Upgrade includes parser: ensure you pulled latest `ai_client.py`
+
+## 9. Age Window & Retention (Refactored)
 
 Three complementary controls govern how long items stick around and which are summarized:
 
@@ -195,29 +250,6 @@ Edge cases:
 - If Azure content filtering splits batches, the bisect logic still respects the summary window (post-filter items consume part of the window as usual).
 
 Adjust these values and restart to apply. The fetcher handles pruning; the summarizer reads window sizes dynamically each pass.
-
-## 8. Telemetry
-
-Feature | How
---------|-----
-Disable all telemetry | `DISABLE_TELEMETRY=true`
-Service name override | `OTEL_SERVICE_NAME=feed-summarizer-prod`
-Environment tag | `OTEL_ENVIRONMENT=production`
-Azure exporter | Provide `APPLICATIONINSIGHTS_CONNECTION_STRING` (or legacy instrumentation key)
-
-If no connection string, spans stay in-process (no console spam). Logs can also be exported when Azure exporter is available.
-
-## 9. Troubleshooting
-
-Symptom | Cause | Fix
---------|-------|----
-Empty summaries | Missing / bad Azure config | Check endpoint host (no scheme), key, deployment
-Few bulletin items | Items filtered / no new content | Verify fetcher logs & summary successes
-Broken feed links | Wrong `RSS_BASE_URL` | Set correct public domain before publishing
-Slow summarization | Rate limit / large content | Adjust `SUMMARIZER_REQUESTS_PER_MINUTE` / enable reader mode selectively
-Missing Azure upload | Vars unset | Provide storage account + key or run without upload
-Telemetry missing | Disabled or no exporter | Remove `DISABLE_TELEMETRY` / set connection string
-Empty summaries with token usage | New structured response format returned parts list | Upgrade includes parser: ensure you pulled latest `ai_client.py`
 
 ## 10. Roadmap Snapshot
 

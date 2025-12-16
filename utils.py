@@ -10,7 +10,7 @@ from asyncio import Lock, sleep
 from collections import Counter
 from hashlib import blake2b
 from time import time
-from typing import Optional
+from typing import Optional, Iterable
 import re
 from urllib.parse import urljoin
 
@@ -313,7 +313,28 @@ def compute_simhash(text: Optional[str], hash_bits: int = 64) -> Optional[int]:
     tokens = re.findall(r"\w+", text.lower())
     if not tokens:
         return None
-    freq = Counter(tokens)
+
+    # Basic stopword list to reduce boilerplate news wording influence.
+    stopwords = {
+        "the", "and", "or", "but", "a", "an", "of", "to", "in", "on", "for",
+        "with", "by", "from", "at", "as", "is", "are", "was", "were", "be",
+        "been", "it", "its", "that", "this", "these", "those", "their", "they",
+        "he", "she", "we", "you", "i", "his", "her", "our", "us",
+        "will", "would", "can", "could", "may", "might", "should",
+        "about", "after", "before", "over", "under", "into", "out", "up", "down",
+        "new", "news", "report", "reports", "reported", "update", "updates",
+        "today", "yesterday", "tomorrow", "year", "years", "month", "months",
+    }
+
+    filtered_tokens = [t for t in tokens if t not in stopwords and len(t) > 2]
+    if not filtered_tokens:
+        return None
+
+    freq = Counter(filtered_tokens)
+    # Keep only the top-N most frequent tokens to dampen noise further.
+    MOST_COMMON_LIMIT = 64
+    if len(freq) > MOST_COMMON_LIMIT:
+        freq = Counter(dict(freq.most_common(MOST_COMMON_LIMIT)))
     bits = max(8, hash_bits)
     if bits % 8 != 0:
         bits -= bits % 8

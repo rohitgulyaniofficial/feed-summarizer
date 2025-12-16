@@ -158,14 +158,15 @@ class FeedProcessingOrchestrator:
         Returns:
             True if successful, False otherwise
         """
-        logger.info("📤 Upload-only mode: syncing existing content to Azure")
+        mode = "forced" if force_upload else "incremental"
+        logger.info(f"📤 Upload-only mode: syncing existing content to Azure ({mode})")
         logger.info(f"Paths: DATA_PATH={config.DATA_PATH} PUBLIC_DIR={config.PUBLIC_DIR} DATABASE_PATH={config.DATABASE_PATH}")
         try:
             publisher = RSSPublisher(base_url=config.RSS_BASE_URL, enable_azure_upload=True)
             await publisher.initialize()
 
-            # Default to forced upload to guarantee freshness
-            results = await publisher.upload_to_azure(force=True, sync_delete=sync_delete)
+            # Honour caller preference for forced vs incremental uploads
+            results = await publisher.upload_to_azure(force=force_upload, sync_delete=sync_delete)
 
             await publisher.close()
 
@@ -185,12 +186,14 @@ class FeedProcessingOrchestrator:
     @trace_span(
         "pipeline.run",
         tracer_name="orchestrator",
-        attr_from_args=lambda self, publish_content=True, only_slugs=None: {
+        attr_from_args=lambda self, publish_content=True, only_slugs=None, enable_azure_upload=True, sync_delete=None, force_upload=False: {
             "pipeline.publish": bool(publish_content),
             "feed.only_slugs": ",".join(only_slugs) if only_slugs else "",
+            "azure.upload.enabled": bool(enable_azure_upload),
+            "azure.upload.force": bool(force_upload),
         },
     )
-    async def run_pipeline(self, publish_content: bool = True, only_slugs: Optional[list] = None, enable_azure_upload: bool = True, sync_delete: Optional[bool] = None) -> bool:
+    async def run_pipeline(self, publish_content: bool = True, only_slugs: Optional[list] = None, enable_azure_upload: bool = True, sync_delete: Optional[bool] = None, force_upload: bool = False) -> bool:
         """Run the complete feed processing pipeline.
         
         Args:
@@ -226,13 +229,14 @@ class FeedProcessingOrchestrator:
         except Exception:
             pass
 
-        # Step 5: Upload to Azure (default on) after all publishing steps
+        # Step 5: Upload to Azure (default incremental) after all publishing steps
         if enable_azure_upload:
             try:
-                logger.info("🌥️ Uploading generated content to Azure (forced)")
+                upload_mode = "forced" if force_upload else "incremental"
+                logger.info(f"🌥️ Uploading generated content to Azure ({upload_mode})")
                 publisher = RSSPublisher(base_url=config.RSS_BASE_URL, enable_azure_upload=True)
                 await publisher.initialize()
-                results = await publisher.upload_to_azure(force=True, sync_delete=sync_delete)
+                results = await publisher.upload_to_azure(force=force_upload, sync_delete=sync_delete)
                 await publisher.close()
 
                 if results:
@@ -398,7 +402,14 @@ def main():
     try:
         if args.mode == 'run':
             # Single pipeline run
-            success = asyncio.run(orchestrator.run_pipeline(publish_content=not args.no_publish, enable_azure_upload=not args.no_azure, sync_delete=args.sync_delete))
+            success = asyncio.run(
+                orchestrator.run_pipeline(
+                    publish_content=not args.no_publish,
+                    enable_azure_upload=not args.no_azure,
+                    sync_delete=args.sync_delete,
+                    force_upload=args.force_upload,
+                )
+            )
             sys.exit(0 if success else 1)
             
         elif args.mode == 'status':

@@ -134,9 +134,60 @@ class FeedScheduler:
             self.schedule_timezone = timezone.utc
         self._load_schedule()
         self.db: Optional[DatabaseQueue] = None
+        self._last_db_maintenance: Optional[datetime] = None
+        self._last_db_vacuum: Optional[datetime] = None
         # Cache of per-feed interval minutes from feeds.yaml
         self.feed_intervals: Dict[str, int] = {}
         self._load_feed_intervals()
+
+    async def _maybe_run_db_maintenance(self, *, success: bool) -> None:
+        """Run WAL checkpoint/optimize (and optional VACUUM) during idle time."""
+        if not success:
+            return
+        if not self.db:
+            return
+        if not getattr(config, "DB_MAINTENANCE_ENABLED", False):
+            return
+
+        now = datetime.now(timezone.utc)
+        interval_h = int(getattr(config, "DB_MAINTENANCE_INTERVAL_HOURS", 24) or 24)
+        interval_s = max(3600, interval_h * 3600)
+        if self._last_db_maintenance is not None:
+            if (now - self._last_db_maintenance).total_seconds() < interval_s:
+                return
+
+        vacuum_enabled = bool(getattr(config, "DB_VACUUM_ENABLED", False))
+        vacuum_interval_h = int(getattr(config, "DB_VACUUM_INTERVAL_HOURS", 168) or 168)
+        vacuum_interval_s = max(3600, vacuum_interval_h * 3600)
+        do_vacuum = False
+        if vacuum_enabled:
+            if self._last_db_vacuum is None:
+                do_vacuum = True
+            else:
+                do_vacuum = (now - self._last_db_vacuum).total_seconds() >= vacuum_interval_s
+
+        checkpoint_mode = str(getattr(config, "DB_WAL_CHECKPOINT_MODE", "TRUNCATE") or "TRUNCATE")
+        busy_timeout_ms = int(getattr(config, "DB_MAINTENANCE_BUSY_TIMEOUT_MS", 10000) or 10000)
+
+        logger.info(
+            "🧹 Running DB maintenance (checkpoint=%s, vacuum=%s)",
+            checkpoint_mode,
+            do_vacuum,
+        )
+        try:
+            res = await self.db.execute(
+                "perform_maintenance",
+                checkpoint_mode=checkpoint_mode,
+                vacuum=do_vacuum,
+                optimize=True,
+                busy_timeout_ms=busy_timeout_ms,
+            )
+            logger.info("🧹 DB maintenance result: %s", res)
+            self._last_db_maintenance = now
+            if do_vacuum:
+                self._last_db_vacuum = now
+        except Exception as e:
+            logger.warning("DB maintenance failed: %s", e)
 
     def _load_feed_intervals(self):
         """Parse per-feed interval settings from feeds.yaml (interval_minutes or refresh_interval_minutes)."""
@@ -472,6 +523,10 @@ class FeedScheduler:
                     logger.info(f"✅ Scheduled pipeline run completed successfully in {duration:.1f}s")
                 else:
                     logger.error(f"❌ Scheduled pipeline run failed after {duration:.1f}s")
+
+                # Perform DB maintenance during the idle window after a successful run.
+                # This helps backups by merging/truncating the WAL when fetching isn't running.
+                await self._maybe_run_db_maintenance(success=success)
                 
             except asyncio.CancelledError:
                 logger.info("📶 Scheduler cancelled - shutting down")

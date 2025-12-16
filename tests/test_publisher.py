@@ -1,4 +1,126 @@
 import pytest
+
+
+@pytest.mark.asyncio
+async def test_merge_similar_summaries_merges_when_topic_and_title_overlap(monkeypatch):
+    # Avoid accidental dependency on environment configuration
+    from publisher import RSSPublisher
+    from utils import compute_simhash
+    from config import config
+
+    monkeypatch.setattr(config, 'SIMHASH_HAMMING_THRESHOLD', 0, raising=False)
+    pub = RSSPublisher(enable_azure_upload=False)
+
+    # Force a permissive threshold for this test (merge fingerprint now includes title)
+    monkeypatch.setattr(config, 'SIMHASH_HAMMING_THRESHOLD', 64, raising=False)
+    text = "Apple Music outage affected some users"
+    title_a = 'Apple Music outage affects users'
+    title_b = 'Apple Music outage impacts some users'
+    merge_a = compute_simhash(f"{title_a}\n{text}")
+    merge_b = compute_simhash(f"{title_b}\n{text}")
+    assert merge_a is not None
+    assert merge_b is not None
+
+    summaries = [
+        {
+            'id': 1,
+            'summary_text': text,
+            'topic': 'Technology',
+            'merge_simhash': merge_a,
+            'item_title': title_a,
+            'item_url': 'https://example.com/a',
+            'feed_slug': 'macrumors',
+        },
+        {
+            'id': 2,
+            'summary_text': text,
+            'topic': 'Technology',
+            'merge_simhash': merge_b,
+            'item_title': title_b,
+            'item_url': 'https://example.com/b',
+            'feed_slug': 'engadget',
+        },
+    ]
+
+    merged = await pub._merge_similar_summaries(summaries)
+    assert len(merged) == 1
+    assert merged[0].get('merged_count') == 2
+    assert set(merged[0].get('merged_ids') or []) == {1, 2}
+    assert len(merged[0].get('merged_links') or []) == 2
+
+
+@pytest.mark.asyncio
+async def test_synthesize_merged_summary_prefers_full_id_coverage(monkeypatch):
+    import json
+    import publisher as publisher_module
+    from publisher import RSSPublisher
+
+    pub = RSSPublisher(enable_azure_upload=False)
+
+    async def fake_chat_completion(messages, purpose=None):
+        # Simulate a model that returns pairwise merges plus one full merge.
+        return json.dumps(
+            [
+                {"summary": "Merged A+B only", "ids": [1, 2]},
+                {"summary": "Merged all three", "ids": [1, 2, 3]},
+            ]
+        )
+
+    monkeypatch.setattr(publisher_module, 'ai_chat_completion', fake_chat_completion)
+
+    group = [
+        {"id": 1, "summary_text": "First summary"},
+        {"id": 2, "summary_text": "Second summary"},
+        {"id": 3, "summary_text": "Third summary"},
+    ]
+
+    merged = await pub._synthesize_merged_summary(group, prompt_template="X", use_llm=True)
+    assert merged == "Merged all three"
+
+
+@pytest.mark.asyncio
+async def test_merge_similar_summaries_can_merge_across_topics(monkeypatch):
+    from publisher import RSSPublisher
+    from utils import compute_simhash
+    from config import config
+
+    pub = RSSPublisher(enable_azure_upload=False)
+    monkeypatch.setattr(config, 'SIMHASH_HAMMING_THRESHOLD', 64, raising=False)
+    # Avoid external calls in unit tests (merging may otherwise invoke the LLM).
+    monkeypatch.setattr(config, 'OPENAI_API_KEY', '', raising=False)
+    monkeypatch.setattr(config, 'AZURE_ENDPOINT', '', raising=False)
+
+    # Topic is not an elimination criterion; identical stories can be mis-filed.
+    text = "Google sued Lighthouse for phishing as a service"
+    title = 'Google sues Lighthouse phishing service'
+    merge_fp = compute_simhash(f"{title}\n{text}")
+    assert merge_fp is not None
+
+    summaries = [
+        {
+            'id': 10,
+            'summary_text': text,
+            'topic': 'Technology',
+            'merge_simhash': merge_fp,
+            'item_title': title,
+            'item_url': 'https://example.com/1',
+            'feed_slug': 'theverge',
+        },
+        {
+            'id': 11,
+            'summary_text': text,
+            'topic': 'Law',
+            'merge_simhash': merge_fp,
+            'item_title': title,
+            'item_url': 'https://example.com/2',
+            'feed_slug': 'slashdot',
+        },
+    ]
+
+    merged = await pub._merge_similar_summaries(summaries)
+    assert len(merged) == 1
+    assert merged[0].get('merged_count') == 2
+    assert set(merged[0].get('merged_ids') or []) == {10, 11}
 from datetime import datetime, timezone
 from publisher import RSSPublisher
 

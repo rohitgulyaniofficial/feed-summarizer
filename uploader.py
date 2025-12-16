@@ -93,7 +93,11 @@ class AzureStorageUploader:
         return self._blob_cache.get(blob_path)
     
     def _get_local_file_hash(self, file_path: Path) -> Optional[str]:
-        """Get MD5 hash of a local file."""
+        """Get hex MD5 hash of a local file.
+
+        This is used to compare against the remote blob's Content-MD5 so we
+        can skip uploads when content is unchanged, even if mtimes differ.
+        """
         try:
             with open(file_path, 'rb') as f:
                 return md5(f.read()).hexdigest()
@@ -136,7 +140,13 @@ class AzureStorageUploader:
             return None
     
     def _should_upload_file(self, local_path: Path, remote_blob_info: Optional[Dict]) -> bool:
-        """Determine if a file should be uploaded based on modification time and size."""
+        """Determine if a file should be uploaded.
+
+        Preference order:
+        - If remote has a Content-MD5 property, compare it to the local MD5 and
+          skip upload when they match.
+        - Otherwise, fall back to size and modification-time comparison.
+        """
         if not local_path.exists():
             return False
             
@@ -147,19 +157,32 @@ class AzureStorageUploader:
         local_stat = local_path.stat()
         local_size = local_stat.st_size
         local_mtime = datetime.fromtimestamp(local_stat.st_mtime, tz=timezone.utc)
-        
+
         remote_size = remote_blob_info.get('content-length', 0)
         remote_mtime = remote_blob_info.get('last-modified')
-        
-        # Upload if size differs or local file is newer
+        remote_md5 = remote_blob_info.get('content-md5')
+
+        # If Content-MD5 is available remotely, prefer a hash-based comparison.
+        if remote_md5 is not None:
+            local_hash = self._get_local_file_hash(local_path)
+            if local_hash is not None:
+                if isinstance(remote_md5, bytes):
+                    remote_hash = remote_md5.hex()
+                else:
+                    remote_hash = str(remote_md5)
+                if local_hash == remote_hash:
+                    logger.debug(f"Skipping upload of {local_path.name} - content hash matches remote")
+                    return False
+
+        # Fallback: upload if size differs or local file is newer
         if local_size != remote_size:
             logger.debug(f"Size difference for {local_path.name}: local={local_size}, remote={remote_size}")
             return True
-            
+
         if remote_mtime and local_mtime > remote_mtime:
             logger.debug(f"Local file newer for {local_path.name}: local={local_mtime}, remote={remote_mtime}")
             return True
-            
+
         return False
     
     async def upload_file(self, local_path: Path, blob_path: str, force: bool = False) -> bool:
@@ -191,17 +214,24 @@ class AzureStorageUploader:
             # Upload the file
             mime_type = self._get_mime_type(local_path)
             cache_control = "public, max-age=300"  # 5 minutes cache for feeds
-            
+
             logger.info(f"Uploading {local_path.name} to {blob_path}")
-            
+
+            # Read the file once so we can both upload it and compute MD5
+            # for the blob's Content-MD5 property.
             with open(local_path, 'rb') as f:
-                response = await self.blob_client.put_blob(
-                    container_name=self.container,
-                    blob_path=blob_path,
-                    payload=f,
-                    mimetype=mime_type,
-                    cache_control=cache_control
-                )
+                data = f.read()
+
+            content_md5 = md5(data).digest()
+
+            response = await self.blob_client.put_blob(
+                container_name=self.container,
+                blob_path=blob_path,
+                payload=data,
+                mimetype=mime_type,
+                cache_control=cache_control,
+                content_md5=content_md5,
+            )
             
             if response.ok:
                 logger.info(f"✅ Successfully uploaded {blob_path}")

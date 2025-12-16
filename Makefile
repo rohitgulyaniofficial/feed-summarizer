@@ -1,4 +1,4 @@
-.PHONY: all pipeline fetcher summarizer publish publish-html publish-rss publish-all upload upload-force clean deploy-production deploy logs deploy-kata-secrets help encrypt-secrets decrypt-secrets
+.PHONY: all pipeline fetcher summarizer publish publish-html publish-rss publish-all upload upload-force clean deploy-production deploy logs deploy-kata-secrets help encrypt-secrets decrypt-secrets test
 export APP_NAME=summarizer
 export PRODUCTION_SERVER=paas
 export PYTHONUNBUFFERED=1
@@ -33,6 +33,10 @@ publish-rss: ## Publish RSS feeds only (no HTML)
 publish-all: ## Publish all content (HTML + RSS) for existing DB
 	@echo "📰 Publishing all content (HTML bulletins and RSS feeds)..."
 	$(PYTHON) -u main.py publish --no-azure
+
+test: ## Run pytest-based test suite
+	@echo "🧪 Running pytest test suite..."
+	$(PYTHON) -m pytest
 
 upload: ## Upload changed files to Azure Storage
 	@echo "☁️  Uploading to Azure Storage..."
@@ -71,6 +75,11 @@ decrypt-secrets: ## Decrypt secrets.yaml.gpg to secrets.yaml (you will be prompt
 	@if [ ! -f secrets.yaml.gpg ]; then echo "❌ secrets.yaml.gpg not found"; exit 1; fi
 	@echo "🔓 Decrypting secrets.yaml.gpg to secrets.yaml ..."
 	gpg --yes --output secrets.yaml --decrypt secrets.yaml.gpg
+
+fetch-database: ## Fetch latest feeds.db from server
+	@echo "📥 Fetching latest feeds.db from Azure..."
+	ssh paas 'sudo cp -r /home/kata/data/summarizer/ .'
+	scp 'paas:summarizer/feeds.db*' .
 
 help: ## Show this help
 	@grep -hE '^[A-Za-z0-9_ \-]*?:.*##.*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'

@@ -42,13 +42,14 @@ similar_merge: |
   INPUT: A list of summaries (plain text) each with an ID.
 
   TASK:
-  - Identify summaries that are very similar or overlapping in content.
-  - Merge similar summaries into a single, concise summary that captures the shared content.
-  - For merged summaries, combine their IDs into a list.
+  - The summaries provided are already pre-grouped as a candidate cluster of the same underlying story.
+  - Merge ALL of them into a single, concise summary that captures the shared content.
+  - Include ALL input IDs in the output (do not drop any).
+  - Do NOT split into pairs or multiple groups.
   
   OUTPUT FORMAT (must be exact):
-  - A RAW JSON array (no preamble, no postscript, no code fences, no Markdown).
-  - Each element: {"summary": string, "ids": [list of IDs]}
+  - A RAW JSON array with EXACTLY ONE element (no preamble, no postscript, no code fences, no Markdown).
+  - The single element: {"summary": string, "ids": [list of IDs]}
   - Preserve each ID EXACTLY as provided (same value/type if possible). Do NOT invent or guess IDs.
   - Valid JSON only: proper quoting, no trailing commas.
   
