@@ -53,13 +53,13 @@ python main.py run                # 5. One full pipeline run (fetch→summarize�
 
 Module | Responsibility
 -------|----------------
-`fetcher.py` | Async retrieval, conditional GET headers, reader mode, error/backoff tracking.
-`summarizer.py` | Batches new items, calls Azure OpenAI, retry & bisection for filtered content.
-`publisher.py` | HTML bulletin + RSS feed generation, passthrough feeds, Azure upload, index pages.
-`scheduler.py` | Time‑zone aware smart scheduling + status reporting.
-`models.py` | Async database queue (SQLite WAL) + safe operation batching.
+`workers/fetcher/` | Async retrieval, conditional GET headers, reader mode, error/backoff tracking.
+`workers/summarizer/` | Batches new items, calls Azure OpenAI, retry & bisection for filtered content.
+`workers/publisher/` | HTML bulletin + RSS feed generation, passthrough feeds, Azure upload, index pages.
+`workers/scheduler/` | Time‑zone aware smart scheduling + status reporting.
+`models/` | Async database queue (SQLite WAL) + safe operation batching.
 `config.py` | Centralized env/YAML/secrets loading + validation + normalization.
-`telemetry.py` | OpenTelemetry initialization & instrumentation (`aiohttp`, sqlite, logging spans).
+`services/telemetry.py` | OpenTelemetry initialization & instrumentation (`aiohttp`, sqlite, logging spans).
 `main.py` | Orchestrator & CLI entry point; composes pipeline steps.
 
 Processing flow (simplified):
@@ -172,7 +172,6 @@ If both `schedule.timezone` and `SCHEDULER_TIMEZONE` are set, the environment va
 ## 6. Publishing Outputs
 
 Path | Description
------|------------
 `public/bulletins/*.html` | Per-group HTML bulletins (recent sessions, optional AI intro)
 `public/feeds/*.xml` | Per-group summarized RSS feeds
 `public/feeds/raw/*.xml` | Raw passthrough feeds (only for slugs listed under `passthrough:`)
@@ -180,15 +179,19 @@ Path | Description
 
 Retention & grouping:
 
-- Bulletins group summaries by session/time window; large sessions split for readability.
-- Passthrough feeds default limit is 50 items (configurable per slug).
 
 Azure Upload:
 
-- Provide `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_KEY` (and optionally `AZURE_STORAGE_CONTAINER`, default `$web`).
-- Set `AZURE_UPLOAD_SYNC_DELETE=true` to purge remote files not present locally.
-- Upload step computes MD5 to skip unchanged blobs.
 
+### Preview status charts locally
+
+Render the current status feed charts to PNG files for quick visual tweaks:
+
+```bash
+python tools/render_status_charts.py --output-dir /tmp/status_charts
+```
+
+By default charts are written under `PUBLIC_DIR/feeds/status_charts`.
 ## 7. Telemetry
 
 Feature | How
@@ -210,7 +213,7 @@ Broken feed links | Wrong `RSS_BASE_URL` | Set correct public domain before publ
 Slow summarization | Rate limit / large content | Adjust `SUMMARIZER_REQUESTS_PER_MINUTE` / enable reader mode selectively
 Missing Azure upload | Vars unset | Provide storage account + key or run without upload
 Telemetry missing | Disabled or no exporter | Remove `DISABLE_TELEMETRY` / set connection string
-Empty summaries with token usage | New structured response format returned parts list | Upgrade includes parser: ensure you pulled latest `ai_client.py`
+Empty summaries with token usage | New structured response format returned parts list | Ensure you pulled the latest `services/llm_client.py` parser
 
 ## 9. Age Window & Retention (Refactored)
 

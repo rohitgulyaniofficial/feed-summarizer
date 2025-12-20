@@ -17,17 +17,18 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 import sqlite3
 import argparse
 
 # Import the main functions from each module
-from fetcher import FeedFetcher
-from summarizer import NewsProcessor
-from publisher import RSSPublisher
+from workers.fetcher import FeedFetcher, run_daily_maintenance
+from workers.summarizer import NewsProcessor
+from workers.publisher import RSSPublisher
+from workers.uploader import upload_public_directory
 from config import config, get_logger
-from scheduler import create_scheduler
-from telemetry import init_telemetry, get_tracer, trace_span
+from workers.scheduler import create_scheduler
+from services.telemetry import init_telemetry, get_tracer, trace_span
 
 # Module-specific logger
 logger = get_logger("orchestrator")
@@ -59,6 +60,7 @@ class FeedProcessingOrchestrator:
         fetcher = FeedFetcher()
         await fetcher.initialize()
         await fetcher.fetch_all_feeds(only_slugs=only_slugs)
+        await run_daily_maintenance(fetcher)
         await fetcher.close()
         logger.info("✅ Feed fetcher completed successfully")
         return True
@@ -81,40 +83,41 @@ class FeedProcessingOrchestrator:
         logger.info("✅ Summarizer completed successfully")
         return True
     
-    async def run_html_publisher(self, enable_azure_upload: bool = True, only_slugs: Optional[list] = None) -> bool:
+    async def run_html_publisher(self, only_slugs: Optional[list] = None) -> bool:
         """Run the HTML publisher step."""
         logger.info("📄 Running HTML publisher")
         try:
-            return await self._run_html_publisher_impl(enable_azure_upload, only_slugs)
+            return await self._run_html_publisher_impl(only_slugs)
         except Exception as e:
             logger.error(f"❌ HTML publisher failed: {e}")
             return False
 
-    @trace_span("run_html_publisher", tracer_name="orchestrator", attr_from_args=lambda self, enable_azure_upload=True, only_slugs=None: {"feed.only_slugs": ",".join(only_slugs) if only_slugs else "", "azure.upload.enabled": bool(enable_azure_upload)})
-    async def _run_html_publisher_impl(self, enable_azure_upload: bool = True, only_slugs: Optional[list] = None) -> bool:
-        publisher = RSSPublisher(base_url=config.RSS_BASE_URL, enable_azure_upload=enable_azure_upload)
+    @trace_span("run_html_publisher", tracer_name="orchestrator", attr_from_args=lambda self, only_slugs=None: {"feed.only_slugs": ",".join(only_slugs) if only_slugs else ""})
+    async def _run_html_publisher_impl(self, only_slugs: Optional[list] = None) -> bool:
+        publisher = RSSPublisher(base_url=config.RSS_BASE_URL)
         await publisher.initialize()
         html_count = await publisher.publish_all_html_bulletins(only_slugs=only_slugs)
         await publisher.close()
         logger.info(f"✅ HTML publisher completed successfully ({html_count} bulletins)")
         return True
     
-    async def run_rss_publisher(self, enable_azure_upload: bool = True, only_slugs: Optional[list] = None) -> bool:
+    async def run_rss_publisher(self, only_slugs: Optional[list] = None) -> bool:
         """Run the RSS publisher step."""
         logger.info("📡 Running RSS publisher")
         try:
-            return await self._run_rss_publisher_impl(enable_azure_upload, only_slugs)
+            return await self._run_rss_publisher_impl(only_slugs)
         except Exception as e:
             logger.error(f"❌ RSS publisher failed: {e}")
             return False
 
-    @trace_span("run_rss_publisher", tracer_name="orchestrator", attr_from_args=lambda self, enable_azure_upload=True, only_slugs=None: {"feed.only_slugs": ",".join(only_slugs) if only_slugs else "", "azure.upload.enabled": bool(enable_azure_upload)})
-    async def _run_rss_publisher_impl(self, enable_azure_upload: bool = True, only_slugs: Optional[list] = None) -> bool:
-        publisher = RSSPublisher(base_url=config.RSS_BASE_URL, enable_azure_upload=enable_azure_upload)
+    @trace_span("run_rss_publisher", tracer_name="orchestrator", attr_from_args=lambda self, only_slugs=None: {"feed.only_slugs": ",".join(only_slugs) if only_slugs else ""})
+    async def _run_rss_publisher_impl(self, only_slugs: Optional[list] = None) -> bool:
+        publisher = RSSPublisher(base_url=config.RSS_BASE_URL)
         await publisher.initialize()
         rss_count = await publisher.publish_all_rss_feeds(only_slugs=only_slugs)
         pt_count = await publisher.publish_passthrough_feeds()
         await publisher._write_index_html()
+        await publisher.close()
         logger.info(f"✅ RSS publisher completed successfully ({rss_count} summary feeds, {pt_count} passthrough feeds)")
         return True
 
@@ -123,7 +126,7 @@ class FeedProcessingOrchestrator:
         """Publish passthrough feeds only (no summaries/bulletins)."""
         logger.info("📡 Running passthrough RSS publisher")
         try:
-            publisher = RSSPublisher(base_url=config.RSS_BASE_URL, enable_azure_upload=False)
+            publisher = RSSPublisher(base_url=config.RSS_BASE_URL)
             await publisher.initialize()
             count = await publisher.publish_passthrough_feeds(only_slugs=only_slugs)
             await publisher._write_index_html()
@@ -134,11 +137,32 @@ class FeedProcessingOrchestrator:
             logger.error(f"❌ Passthrough publisher failed: {e}")
             return False
     
-    async def run_publisher_all(self, enable_azure_upload: bool = True) -> bool:
+    @trace_span("run_status_feed", tracer_name="orchestrator")
+    async def run_status_feed(self, enable_azure_upload: bool = True) -> bool:
+        """Publish the status feed (charts/metrics) without fetching or summarizing."""
+        logger.info("📈 Publishing status feed only")
+        try:
+            publisher = RSSPublisher(base_url=config.RSS_BASE_URL)
+            await publisher.initialize()
+            success = await publisher.publish_status_feed()
+            await publisher.close()
+
+            if success and enable_azure_upload:
+                try:
+                    logger.info("🌥️ Uploading status feed to Azure")
+                    await self.upload_public_content(force_upload=False, sync_delete=None)
+                except Exception as exc:
+                    logger.error(f"❌ Azure upload after status feed failed: {exc}")
+            return success
+        except Exception as exc:
+            logger.error(f"❌ Status feed publication failed: {exc}")
+            return False
+
+    async def run_publisher_all(self) -> bool:
         """Run unified publisher (HTML + RSS + indexes + passthrough)."""
         logger.info("📰 Running unified publisher (HTML + RSS)")
         try:
-            publisher = RSSPublisher(base_url=config.RSS_BASE_URL, enable_azure_upload=enable_azure_upload)
+            publisher = RSSPublisher(base_url=config.RSS_BASE_URL)
             await publisher.initialize()
             # Publish everything (HTML bulletins -> RSS feeds -> passthrough -> indexes)
             await publisher.publish_all_content()
@@ -150,25 +174,12 @@ class FeedProcessingOrchestrator:
             return False
 
     async def run_publisher_with_upload(self, force_upload: bool = False, sync_delete: Optional[bool] = None) -> bool:
-        """Upload existing published content to Azure without re-publishing.
-
-        Args:
-            force_upload: Force upload all files to Azure even if unchanged
-
-        Returns:
-            True if successful, False otherwise
-        """
+        """Upload existing published content to Azure without re-publishing."""
         mode = "forced" if force_upload else "incremental"
         logger.info(f"📤 Upload-only mode: syncing existing content to Azure ({mode})")
         logger.info(f"Paths: DATA_PATH={config.DATA_PATH} PUBLIC_DIR={config.PUBLIC_DIR} DATABASE_PATH={config.DATABASE_PATH}")
         try:
-            publisher = RSSPublisher(base_url=config.RSS_BASE_URL, enable_azure_upload=True)
-            await publisher.initialize()
-
-            # Honour caller preference for forced vs incremental uploads
-            results = await publisher.upload_to_azure(force=force_upload, sync_delete=sync_delete)
-
-            await publisher.close()
+            results = await self.upload_public_content(force_upload=force_upload, sync_delete=sync_delete)
 
             if results:
                 total_uploaded = sum(uploaded for uploaded, _, _ in results.values())
@@ -234,10 +245,7 @@ class FeedProcessingOrchestrator:
             try:
                 upload_mode = "forced" if force_upload else "incremental"
                 logger.info(f"🌥️ Uploading generated content to Azure ({upload_mode})")
-                publisher = RSSPublisher(base_url=config.RSS_BASE_URL, enable_azure_upload=True)
-                await publisher.initialize()
-                results = await publisher.upload_to_azure(force=force_upload, sync_delete=sync_delete)
-                await publisher.close()
+                results = await self.upload_public_content(force_upload=force_upload, sync_delete=sync_delete)
 
                 if results:
                     total_uploaded = sum(uploaded for uploaded, _, _ in results.values())
@@ -357,6 +365,19 @@ class FeedProcessingOrchestrator:
         print(f"   📄 HTML Bulletins: {output['html_bulletins']}")
         print(f"   📡 RSS Feeds: {output['rss_feeds']}")
 
+    @trace_span(
+        "upload_to_azure",
+        tracer_name="orchestrator",
+        attr_from_args=lambda self, force_upload=False, sync_delete=None: {
+            "azure.upload.force": bool(force_upload),
+            "azure.upload.sync_delete": bool(sync_delete) if sync_delete is not None else bool(config.AZURE_UPLOAD_SYNC_DELETE),
+        },
+    )
+    async def upload_public_content(self, force_upload: bool = False, sync_delete: Optional[bool] = None) -> Optional[Dict[str, Tuple[int, int, int]]]:
+        """Upload PUBLIC_DIR contents to Azure storage."""
+        results = await upload_public_directory(Path(config.PUBLIC_DIR), force=force_upload, sync_delete=sync_delete)
+        return results
+
 
 async def run_scheduled_mode():
     """Run the orchestrator in smart scheduled mode using feeds.yaml configuration."""
@@ -443,7 +464,9 @@ def main():
 
         elif args.mode == 'publish':
             # Publish HTML + RSS + indexes using existing data (no fetch/summarize)
-            success = asyncio.run(orchestrator.run_publisher_all(enable_azure_upload=not args.no_azure))
+            success = asyncio.run(orchestrator.run_publisher_all())
+            if success and not args.no_azure:
+                asyncio.run(orchestrator.upload_public_content(force_upload=args.force_upload, sync_delete=args.sync_delete))
             sys.exit(0 if success else 1)
             
     except KeyboardInterrupt:

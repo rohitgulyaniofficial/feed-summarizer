@@ -51,6 +51,8 @@ clean: ## Remove local database and generated public content
 	rm -f feeds.db*
 	@echo "🧹 Cleaning published content..."
 	rm -rf public/
+	@echo "🧹 Cleaning __pycache__..."
+	find . -name '__pycache__' -type d -prune -exec rm -rf {} +
 
 deploy-production: ## Push master to production remote
 	git push production main

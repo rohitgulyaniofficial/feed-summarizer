@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""Constants used by the feed fetcher."""
+
+from typing import Final
+
+HOUR_IN_SECONDS: Final = 3600
+MAX_BACKOFF_HOURS: Final = 24
+MAIN_LOOP_INTERVAL_HOURS: Final = 2
+SECONDS_PER_MINUTE: Final = 60
+DAILY_REPORT_THRESHOLD_SECONDS: Final = 60
+
+HTTP_OK: Final = 200
+HTTP_NOT_MODIFIED: Final = 304
+HTTP_TOO_MANY_REQUESTS: Final = 429
+
+__all__ = [
+    "HOUR_IN_SECONDS",
+    "MAX_BACKOFF_HOURS",
+    "MAIN_LOOP_INTERVAL_HOURS",
+    "SECONDS_PER_MINUTE",
+    "DAILY_REPORT_THRESHOLD_SECONDS",
+    "HTTP_OK",
+    "HTTP_NOT_MODIFIED",
+    "HTTP_TOO_MANY_REQUESTS",
+]

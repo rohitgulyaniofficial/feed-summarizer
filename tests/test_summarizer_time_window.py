@@ -2,7 +2,7 @@ import pytest
 from datetime import datetime, timezone, timedelta
 from config import config
 from models import DatabaseQueue
-from summarizer import NewsProcessor
+from workers.summarizer import NewsProcessor
 from aiohttp import ClientSession
 
 @pytest.mark.asyncio

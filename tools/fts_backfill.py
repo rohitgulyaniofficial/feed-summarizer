@@ -28,7 +28,7 @@ def _fts_available(conn: sqlite3.Connection) -> bool:
 
 
 def _ensure_fts(conn: sqlite3.Connection) -> None:
-    """Best-effort create, matching schema.sql/models.py migration."""
+    """Best-effort create, matching models/schema.sql and models/schema.py migrations."""
     conn.execute(
         """
         CREATE VIRTUAL TABLE IF NOT EXISTS summary_fts

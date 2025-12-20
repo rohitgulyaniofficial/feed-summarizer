@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from summarizer import NewsProcessor
+from workers.summarizer import NewsProcessor
 
 @pytest.fixture
 def sample_entries():

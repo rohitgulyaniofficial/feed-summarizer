@@ -4,14 +4,14 @@ aiohttp
 feedparser
 beautifulsoup4
 asyncio
-pytest-asyncio
+pillow
+feedgen
 pyyaml
 #readability-python
 readability-lxml
 python-dotenv
 markdownify
 Markdown
-feedgen
 pypdf>=4.2.0
 pytest
 openai>=1.48.0
@@ -24,3 +24,4 @@ opentelemetry-instrumentation-aiohttp-client
 opentelemetry-instrumentation-logging
 opentelemetry-instrumentation-sqlite3
 azure-monitor-opentelemetry-exporter
+azure-storage-blob

@@ -196,10 +196,10 @@ class Config:
 
         # SQLite maintenance (helps backups by merging WAL back into main DB)
         # - checkpoint/optimize are typically cheap; VACUUM can be expensive.
-        self.DB_MAINTENANCE_ENABLED = environ.get("DB_MAINTENANCE_ENABLED", "false").lower() == "true"
+        self.DB_MAINTENANCE_ENABLED = environ.get("DB_MAINTENANCE_ENABLED", "true").lower() == "true"
         self.DB_MAINTENANCE_INTERVAL_HOURS = self._validate_positive_int("DB_MAINTENANCE_INTERVAL_HOURS", 24, 1)
         self.DB_WAL_CHECKPOINT_MODE = environ.get("DB_WAL_CHECKPOINT_MODE", "TRUNCATE").strip().upper()
-        self.DB_VACUUM_ENABLED = environ.get("DB_VACUUM_ENABLED", "false").lower() == "true"
+        self.DB_VACUUM_ENABLED = environ.get("DB_VACUUM_ENABLED", "true").lower() == "true"
         self.DB_VACUUM_INTERVAL_HOURS = self._validate_positive_int("DB_VACUUM_INTERVAL_HOURS", 168, 1)
         self.DB_MAINTENANCE_BUSY_TIMEOUT_MS = self._validate_positive_int("DB_MAINTENANCE_BUSY_TIMEOUT_MS", 10000, 1000)
 
@@ -226,16 +226,16 @@ class Config:
         # - With a stable merge fingerprint (title + summary) and conservative guardrails,
         #   a lower threshold tends to reduce false positives.
         try:
-            threshold = int(environ.get("SIMHASH_HAMMING_THRESHOLD", "12"))
+            threshold = int(environ.get("SIMHASH_HAMMING_THRESHOLD", "24"))
         except (ValueError, TypeError):
-            threshold = 12
+            threshold = 24
         if threshold < 0:
             threshold = 0
         self.SIMHASH_HAMMING_THRESHOLD = threshold
 
         # Optional BM25/FTS5 fallback matching
         # Conservative defaults: disabled unless explicitly enabled.
-        self.BM25_MERGE_ENABLED = environ.get("BM25_MERGE_ENABLED", "false").strip().lower() == "true"
+        self.BM25_MERGE_ENABLED = environ.get("BM25_MERGE_ENABLED", "true").strip().lower() == "true"
         # Require candidate BM25 score to be close to self-score (ratio in [0,1], higher is stronger)
         try:
             self.BM25_MERGE_RATIO_THRESHOLD = float(environ.get("BM25_MERGE_RATIO_THRESHOLD", "0.80"))
@@ -247,8 +247,32 @@ class Config:
             self.BM25_MERGE_RATIO_THRESHOLD = 1.0
 
         # Only consider BM25 when SimHash is missing or slightly above threshold.
-        self.BM25_MERGE_MAX_EXTRA_DISTANCE = self._validate_positive_int("BM25_MERGE_MAX_EXTRA_DISTANCE", 6, 0)
+        self.BM25_MERGE_MAX_EXTRA_DISTANCE = self._validate_positive_int("BM25_MERGE_MAX_EXTRA_DISTANCE", 16, 0)
         self.BM25_MERGE_MAX_QUERY_TOKENS = self._validate_positive_int("BM25_MERGE_MAX_QUERY_TOKENS", 8, 1)
+
+        # Hashed cosine confirmation gate (CPU-fast, dependency-free)
+        # When enabled, merging requires cosine >= HASHED_COSINE_MIN_SIM in addition to
+        # SimHash/BM25 criteria.
+        self.HASHED_COSINE_ENABLED = environ.get("HASHED_COSINE_ENABLED", "false").strip().lower() == "true"
+        self.HASHED_COSINE_BUCKETS = self._validate_positive_int("HASHED_COSINE_BUCKETS", 65536, 1024)
+        self.HASHED_COSINE_MAX_TOKENS = self._validate_positive_int("HASHED_COSINE_MAX_TOKENS", 128, 16)
+        try:
+            min_sim = float(environ.get("HASHED_COSINE_MIN_SIM", "0.25"))
+        except (ValueError, TypeError):
+            min_sim = 0.25
+        if min_sim < 0:
+            min_sim = 0.0
+        if min_sim > 1:
+            min_sim = 1.0
+        self.HASHED_COSINE_MIN_SIM = float(min_sim)
+
+        # Merge clustering strategy for SimHash candidate graph.
+        # - 'single'   : single-linkage (union-find). Can over-merge transitively.
+        # - 'complete' : complete-linkage (all pairs within threshold). More conservative.
+        linkage = (environ.get("SIMHASH_MERGE_LINKAGE", "complete") or "complete").strip().lower()
+        if linkage not in {"single", "complete"}:
+            linkage = "complete"
+        self.SIMHASH_MERGE_LINKAGE = linkage
 
         # File size limits
         self.SCHEMA_FILE_SIZE_LIMIT_MB = self._validate_positive_int("SCHEMA_FILE_SIZE_LIMIT_MB", 10, 1)
@@ -291,6 +315,12 @@ class Config:
         # Scheduler configuration
         self.SCHEDULER_TIMEZONE = environ.get("SCHEDULER_TIMEZONE", "UTC")
         self.SCHEDULER_RUN_IMMEDIATELY = environ.get("SCHEDULER_RUN_IMMEDIATELY", "false").lower() == "true"
+        # Publish the status feed a few minutes before local midnight (scheduler timezone)
+        self.STATUS_FEED_MINUTES_BEFORE_MIDNIGHT = self._validate_positive_int(
+            "STATUS_FEED_MINUTES_BEFORE_MIDNIGHT",
+            5,
+            1,
+        )
 
         # File paths
         base_dir = path.dirname(path.abspath(__file__))
@@ -299,7 +329,7 @@ class Config:
         self.DATA_PATH = environ.get("DATA_PATH", base_dir)
         # PUBLIC_DIR: where HTML/RSS outputs are written (defaults to $DATA_PATH/public)
         self.PUBLIC_DIR = environ.get("PUBLIC_DIR", path.join(self.DATA_PATH, "public"))
-        self.SCHEMA_FILE_PATH = path.join(base_dir, "schema.sql")
+        self.SCHEMA_FILE_PATH = path.join(base_dir, "models", "schema.sql")
         self.FEEDS_CONFIG_PATH = path.join(base_dir, "feeds.yaml")
         self.PROMPT_CONFIG_PATH = path.join(base_dir, "prompt.yaml")
     

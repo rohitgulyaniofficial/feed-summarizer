@@ -1,6 +1,6 @@
 import pytest
-from llm_client import chat_completion
-from summarizer import ContentFilterError
+from services.llm_client import chat_completion
+from workers.summarizer import ContentFilterError
 
 
 class FakeChoice:

@@ -1,5 +1,5 @@
 import pytest
-from llm_client import chat_completion
+from services.llm_client import chat_completion
 
 
 class FakeChoice:

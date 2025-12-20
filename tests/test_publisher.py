@@ -1,15 +1,17 @@
+import json
+
 import pytest
+
+from config import config
+from utils import compute_simhash
+import workers.publisher as publisher_module
+from workers.publisher import RSSPublisher
 
 
 @pytest.mark.asyncio
-async def test_merge_similar_summaries_merges_when_topic_and_title_overlap(monkeypatch):
-    # Avoid accidental dependency on environment configuration
-    from publisher import RSSPublisher
-    from utils import compute_simhash
-    from config import config
-
+async def test_merge_similar_summaries_merges_when_title_and_text_overlap(monkeypatch):
     monkeypatch.setattr(config, 'SIMHASH_HAMMING_THRESHOLD', 0, raising=False)
-    pub = RSSPublisher(enable_azure_upload=False)
+    pub = RSSPublisher()
 
     # Force a permissive threshold for this test (merge fingerprint now includes title)
     monkeypatch.setattr(config, 'SIMHASH_HAMMING_THRESHOLD', 64, raising=False)
@@ -47,15 +49,12 @@ async def test_merge_similar_summaries_merges_when_topic_and_title_overlap(monke
     assert merged[0].get('merged_count') == 2
     assert set(merged[0].get('merged_ids') or []) == {1, 2}
     assert len(merged[0].get('merged_links') or []) == 2
+    assert merged[0].get('topic') == 'Technology'
 
 
 @pytest.mark.asyncio
 async def test_synthesize_merged_summary_prefers_full_id_coverage(monkeypatch):
-    import json
-    import publisher as publisher_module
-    from publisher import RSSPublisher
-
-    pub = RSSPublisher(enable_azure_upload=False)
+    pub = RSSPublisher()
 
     async def fake_chat_completion(messages, purpose=None):
         # Simulate a model that returns pairwise merges plus one full merge.
@@ -80,11 +79,7 @@ async def test_synthesize_merged_summary_prefers_full_id_coverage(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_merge_similar_summaries_can_merge_across_topics(monkeypatch):
-    from publisher import RSSPublisher
-    from utils import compute_simhash
-    from config import config
-
-    pub = RSSPublisher(enable_azure_upload=False)
+    pub = RSSPublisher()
     monkeypatch.setattr(config, 'SIMHASH_HAMMING_THRESHOLD', 64, raising=False)
     # Avoid external calls in unit tests (merging may otherwise invoke the LLM).
     monkeypatch.setattr(config, 'OPENAI_API_KEY', '', raising=False)
@@ -121,8 +116,35 @@ async def test_merge_similar_summaries_can_merge_across_topics(monkeypatch):
     assert len(merged) == 1
     assert merged[0].get('merged_count') == 2
     assert set(merged[0].get('merged_ids') or []) == {10, 11}
+    # Conflicting topics are not reliable for a merged label.
+    assert merged[0].get('topic') == 'Breaking News'
+
+
+@pytest.mark.asyncio
+async def test_merge_similar_summaries_requires_at_least_two_items(monkeypatch):
+    from workers.publisher import RSSPublisher
+    from config import config
+
+    pub = RSSPublisher()
+    monkeypatch.setattr(config, 'SIMHASH_HAMMING_THRESHOLD', 64, raising=False)
+    monkeypatch.setattr(config, 'OPENAI_API_KEY', '', raising=False)
+    monkeypatch.setattr(config, 'AZURE_ENDPOINT', '', raising=False)
+
+    summaries = [
+        {
+            'id': 1,
+            'summary_text': 'Only one summary here',
+            'item_title': 'Singleton summary',
+            'item_url': 'https://example.com/only',
+            'feed_slug': 'example',
+        }
+    ]
+
+    merged = await pub._merge_similar_summaries(summaries)
+    assert len(merged) == 1
+    assert merged[0].get('merged_count') in (None, 0)
 from datetime import datetime, timezone
-from publisher import RSSPublisher
+from workers.publisher import RSSPublisher
 
 @pytest.fixture
 def sample_feeds_info():

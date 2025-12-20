@@ -1,7 +1,8 @@
 import asyncio
 import pytest
 import feedparser
-from fetcher import FeedFetcher
+from workers.fetcher import FeedFetcher
+from workers.fetcher.entries import process_feed_entries
 from config import config
 
 
@@ -44,7 +45,18 @@ async def test_global_url_dedup(monkeypatch, tmp_path):
     entries_a = [entry1, entry2]
 
     # Process first feed
-    await fetcher._process_feed_entries(feed_a_id, 'reg_a', entries_a, post_process=False, reader_mode=False, session=None)  # type: ignore
+    await process_feed_entries(
+        fetcher.db,
+        feed_a_id,
+        'reg_a',
+        entries_a,
+        post_process=False,
+        reader_mode=False,
+        reader_rate_limiter=fetcher.reader_rate_limiter,
+        fetch_original_content=fetcher.fetch_original_content,
+        session=None,
+        proxy_url=None,
+    )
 
     count_after_a = await fetcher.db.execute('count_items')
     assert count_after_a == 2, f"Expected 2 items after first feed, got {count_after_a}"
@@ -64,7 +76,18 @@ async def test_global_url_dedup(monkeypatch, tmp_path):
     })
     entries_b = [entry3_dup, entry4_new]
 
-    await fetcher._process_feed_entries(feed_b_id, 'reg_b', entries_b, post_process=False, reader_mode=False, session=None)  # type: ignore
+    await process_feed_entries(
+        fetcher.db,
+        feed_b_id,
+        'reg_b',
+        entries_b,
+        post_process=False,
+        reader_mode=False,
+        reader_rate_limiter=fetcher.reader_rate_limiter,
+        fetch_original_content=fetcher.fetch_original_content,
+        session=None,
+        proxy_url=None,
+    )
 
     count_after_b = await fetcher.db.execute('count_items')
     # Should only increase by 1 (the truly new URL), not by 2

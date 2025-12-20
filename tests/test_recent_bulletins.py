@@ -1,5 +1,5 @@
 from pathlib import Path
-from publisher import RSSPublisher
+from workers.publisher import RSSPublisher
 from config import config
 import asyncio
 
@@ -25,7 +25,7 @@ def test_build_recent_bulletins(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(config, 'DATA_PATH', tmp_path, raising=False)
 
     # Act
-    publisher = RSSPublisher(base_url='https://example.test', enable_azure_upload=False)
+    publisher = RSSPublisher(base_url='https://example.test')
     latest_titles = {'ai': 'AI Bulletin Title'}
     recent = publisher.build_recent_bulletins(latest_titles)
 
