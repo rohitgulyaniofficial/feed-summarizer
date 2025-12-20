@@ -4,26 +4,34 @@ Funny story: This was mostly a vibe-coded project that got out of hand. It actua
 
 As a direct outcome of my swearing at various LLMs, it became this, which is, in a mouthful, an `asyncio`-based background service that fetches multiple RSS/Atom (and optional Mastodon) sources, stores raw items in SQLite, generates AI summaries (Azure OpenAI), groups them into bulletins, and publishes both HTML and RSS outputs (optionally uploading to Azure Blob Static Website hosting).
 
+And the end-user experience, for me (using [Reeder Classic](https://reederapp.com/classic)), looks like this:
+
+![Feed Summarizer Example Output](docs/reeder.png)
+
+Neatly organized by topic, with concise summaries and links to the original articles, all in a clean, readable format I can peruse over breakfast.
+
+## Overview
+
 The pipeline is designed for efficiency (conditional fetching, batching, backoff) and the output is tailored to my reading habits (three "bulletins" per day that group items by topic, each bulletin published as both HTML and an RSS entry).
 
 Most of the implementation started as a vibe-coded prototype, with some manual tweaking here and there, but it now has extensive error handling, logging, and observability hooks for Azure Application Insights via OpenTelemetry, and it publishes to Azure Blob Storage for publishing the results because there is no way I am letting this thing run a web server.
 
-It is also deployable as a Docker Swarm service using `kata`, a private helper tool used for my own infrastructure.
+It is also deployable as a Docker Swarm service using [`kata`](https://github.com/rcarmo/kata), a private helper tool used for my own infrastructure.
 
-## Contents
 
-1. Features
-2. Quickstart (5 commands)
-3. Architecture (high‑level)
-4. Configuration & Environment
-5. Running (one‑shot vs scheduled vs step modes)
-6. Publishing Outputs (HTML / RSS / passthrough / Azure)
-7. Telemetry (opt‑out / service naming)
-8. Troubleshooting
-9. Age Window & Retention
-10. Roadmap Snapshot
+## Quickstart (5 commands)
 
-## 1. Features
+```bash
+python -m venv .venv              # 1. Create virtualenv
+source .venv/bin/activate         # 2. Activate it
+pip install -r requirements.txt   # 3. Install dependencies
+cp feeds.yaml.example feeds.yaml  # 4. Seed a starter config (edit it)
+python main.py run                # 5. One full pipeline run (fetch→summarize→publish→upload*)
+```
+
+(\*) Azure upload happens only if storage env vars are set; otherwise it is skipped automatically.
+
+## Features
 
 - Concurrent conditional feed fetching (ETag / Last-Modified; respectful backoff & error tracking)
 - Optional reader mode & GitHub README enrichment for richer summarization context
@@ -37,228 +45,19 @@ It is also deployable as a Docker Swarm service using `kata`, a private helper t
 - Config hot‑reload for feeds; caching of YAML & prompt data
 - Observability hooks via OpenTelemetry (HTTP, DB, custom spans)
 
-## 2. Quickstart (5 commands)
+## Documentation
 
-```bash
-python -m venv .venv              # 1. Create virtualenv
-source .venv/bin/activate         # 2. Activate it
-pip install -r requirements.txt   # 3. Install dependencies
-cp feeds.yaml.example feeds.yaml  # 4. Seed a starter config (edit it)
-python main.py run                # 5. One full pipeline run (fetch→summarize→publish→upload*)
-```
+Long-form documentation is in the `docs/` folder:
 
-(*) Azure upload happens only if storage env vars are set; otherwise it is skipped automatically.
-
-## 3. Architecture (High‑Level)
-
-Module | Responsibility
--------|----------------
-`workers/fetcher/` | Async retrieval, conditional GET headers, reader mode, error/backoff tracking.
-`workers/summarizer/` | Batches new items, calls Azure OpenAI, retry & bisection for filtered content.
-`workers/publisher/` | HTML bulletin + RSS feed generation, passthrough feeds, Azure upload, index pages.
-`workers/scheduler/` | Time‑zone aware smart scheduling + status reporting.
-`models/` | Async database queue (SQLite WAL) + safe operation batching.
-`config.py` | Centralized env/YAML/secrets loading + validation + normalization.
-`services/telemetry.py` | OpenTelemetry initialization & instrumentation (`aiohttp`, sqlite, logging spans).
-`main.py` | Orchestrator & CLI entry point; composes pipeline steps.
-
-Processing flow (simplified):
-
-```text
-feeds.yaml -> fetcher -> items (SQLite) -> summarizer -> summaries -> publisher -> public/{bulletins,feeds}
-                               ^                                           |
-                               |_______ backoff + error counts ____________|
-```
-
-See `SPEC.md` for detailed sequence diagrams and data model rationale.
-
-## 4. Configuration & Environment
-
-Core files:
-
-- `feeds.yaml` (sources, groups, schedule, passthrough) – see `feeds.yaml.example`.
-- `prompt.yaml` (prompt templates for summarization & bulletins).
-- `secrets.yaml` (or `.env`) for credentials; example in `secrets.yaml.example`.
-
-Essential environment variables:
-
-Variable | Purpose | Notes
----------|---------|------
-`AZURE_ENDPOINT` | Azure OpenAI endpoint host (no scheme) | Auto-normalized (strip https://)
-`OPENAI_API_KEY` | Azure OpenAI API key | Required for summaries
-`DEPLOYMENT_NAME` | Model deployment (e.g. `gpt-4o-mini`) | Default: `gpt-4o-mini`
-`RSS_BASE_URL` | Public base URL for generated links | Affects GUID/self links
-`DATABASE_PATH` | SQLite path | Default: feeds.db
-`PUBLIC_DIR` | Output directory root | Default: ./public
-`AZURE_STORAGE_ACCOUNT` | Blob storage account | Optional
-`AZURE_STORAGE_KEY` | Blob storage key | Optional
-`AZURE_UPLOAD_SYNC_DELETE` | Delete remote orphans | Default: false (danger when true)
-`FETCH_INTERVAL_MINUTES` | Base interval fallback | Default: 30
-`SCHEDULER_TIMEZONE` | Override schedule TZ if not in feeds.yaml | Default: UTC
-`MAX_ITEMS_PER_FEED` | Per-feed physical retention cap | Default: 400
-`SUMMARY_WINDOW_ITEMS` | Unsummarized items per feed per summarizer pass | Default: 50
-`BULLETIN_SUMMARY_LIMIT` | Summaries per HTML bulletin chunk | Default: 100
-`BULLETIN_PER_FEED_LIMIT` | Max summaries a single feed can contribute to one chunk | Default: 40 (auto-reduced if many feeds)
-`BULLETIN_MAX_CHUNKS` | Backlog chunks processed per run | Default: 5
-`SIMHASH_HAMMING_THRESHOLD` | Max Hamming distance (0-64) for merging summaries | Default: 12 (set 0 to disable)
-`BM25_MERGE_ENABLED` | Enable BM25/FTS5 merge fallback | Default: false
-`BM25_MERGE_RATIO_THRESHOLD` | Minimum mutual BM25 ratio to accept a merge | Default: 0.80
-`BM25_MERGE_MAX_EXTRA_DISTANCE` | Allow BM25 to merge beyond SimHash threshold by this many bits | Default: 6
-`BM25_MERGE_MAX_QUERY_TOKENS` | Cap tokens used in BM25 queries | Default: 8
-`LOG_LEVEL` | DEBUG / INFO / WARNING / ERROR | Default: INFO
-`DISABLE_TELEMETRY` | Set true to disable all tracing/log export | Default: false
-
-`secrets.yaml` may be either a top-level mapping or nested under `environment:`. Both are parsed and override `.env` and process env values.
-
-### Dedupe & Merge Tuning (SimHash + optional BM25)
-
-This project attempts to merge near-duplicate summaries when generating bulletins/feeds.
-
-- **SimHash** is the primary signal: two summaries merge when their merge fingerprints are within `SIMHASH_HAMMING_THRESHOLD` bits.
-- **Topic is not a merge veto**: mis-filed topics are allowed to merge; topics are primarily used for grouping/presentation.
-- **BM25/FTS5 fallback (optional):** when enabled, the publisher can use SQLite FTS5 BM25 scoring as a conservative fallback to merge textually identical stories that fall outside the strict SimHash threshold.
-  - BM25 only applies if FTS is available and `summary_fts` exists.
-  - On older databases, `summary_fts` may exist but be empty; run the backfill tool once (see below).
-
-Example Docker/Kata settings:
-
-```yaml
-SIMHASH_HAMMING_THRESHOLD: 24
-BM25_MERGE_ENABLED: "true"
-BM25_MERGE_MAX_EXTRA_DISTANCE: "16"
-```
-
-Diagnostics:
-
-- `tools/merge_report.py` prints both SimHash and BM25 decisions (when enabled) for a keyword across recent bulletins.
-  - Example: `python3 tools/merge_report.py --hours 96 --threshold 24 --query Cloudflare`
-
-FTS backfill (one-time, for existing DBs):
-
-- `tools/fts_backfill.py` can populate `summary_fts` from historical rows so BM25 works immediately.
-  - Example: `python3 tools/fts_backfill.py --db /data/feeds.db`
-
-## 5. Running
-
-Mode | Command | What it does
------|---------|-------------
-One-shot full pipeline | `python main.py run` | Fetch → Summarize → Publish (HTML+RSS+passthrough) → Azure upload (if configured)
-Scheduled (smart) | `python main.py scheduled` | Run continuously at times declared under `schedule:` in `feeds.yaml`
-Show schedule | `python main.py schedule-status` | Print parsed schedule (with timezone)
-Status snapshot | `python main.py status` | DB counts + output presence
-Fetch only | `python main.py fetcher` | Just ingest feeds (no summarization/publish)
-Summarize only | `python main.py summarizer` | Summarize new items (no publish)
-Upload existing output | `python main.py upload` | Sync current `public/` tree to Azure only
-
-Useful flags:
-
-- `--no-publish` (with `run`) skip HTML/RSS generation.
-- `--no-azure` disable Azure upload for that invocation.
-- `--sync-delete` remove remote blobs not present locally (use cautiously).
-
-Scheduling:
-
-```yaml
-schedule:
-  timezone: Europe/Lisbon
-  times:
-    - "06:30"
-    - "12:30"
-    - "20:30"
-```
-
-If both `schedule.timezone` and `SCHEDULER_TIMEZONE` are set, the environment variable wins.
-
-## 6. Publishing Outputs
-
-Path | Description
-`public/bulletins/*.html` | Per-group HTML bulletins (recent sessions, optional AI intro)
-`public/feeds/*.xml` | Per-group summarized RSS feeds
-`public/feeds/raw/*.xml` | Raw passthrough feeds (only for slugs listed under `passthrough:`)
-`public/index.html` | Landing page / directory index
-
-Retention & grouping:
-
-
-Azure Upload:
-
-
-### Preview status charts locally
-
-Render the current status feed charts to PNG files for quick visual tweaks:
-
-```bash
-python tools/render_status_charts.py --output-dir /tmp/status_charts
-```
-
-By default charts are written under `PUBLIC_DIR/feeds/status_charts`.
-## 7. Telemetry
-
-Feature | How
---------|-----
-Disable all telemetry | `DISABLE_TELEMETRY=true`
-Service name override | `OTEL_SERVICE_NAME=feed-summarizer-prod`
-Environment tag | `OTEL_ENVIRONMENT=production`
-Azure exporter | Provide `APPLICATIONINSIGHTS_CONNECTION_STRING` (or legacy instrumentation key)
-
-If no connection string, spans stay in-process (no console spam). Logs can also be exported when Azure exporter is available.
-
-## 8. Troubleshooting
-
-Symptom | Cause | Fix
---------|-------|----
-Empty summaries | Missing / bad Azure config | Check endpoint host (no scheme), key, deployment
-Few bulletin items | Items filtered / no new content | Verify fetcher logs & summary successes
-Broken feed links | Wrong `RSS_BASE_URL` | Set correct public domain before publishing
-Slow summarization | Rate limit / large content | Adjust `SUMMARIZER_REQUESTS_PER_MINUTE` / enable reader mode selectively
-Missing Azure upload | Vars unset | Provide storage account + key or run without upload
-Telemetry missing | Disabled or no exporter | Remove `DISABLE_TELEMETRY` / set connection string
-Empty summaries with token usage | New structured response format returned parts list | Ensure you pulled the latest `services/llm_client.py` parser
-
-## 9. Age Window & Retention (Refactored)
-
-Three complementary controls govern how long items stick around and which are summarized:
-
-1. Time Window (feeds.yaml: `thresholds.time_window_hours`) – Unsummarized items older than this window are ignored when building prompts. Default: 48h. Raise temporarily for historical backfill.
-2. Count-Based Physical Retention (env: `MAX_ITEMS_PER_FEED`) – After each fetch the newest N items per feed are kept (default 400). Older items beyond that per-feed cap are pruned. This prevents date-less feeds from re-surfacing old entries as “new” after day-based purges.
-3. Summary Window (env: `SUMMARY_WINDOW_ITEMS`) – At most the newest N unsummarized items per feed are considered in a single summarizer pass (default 50). Larger backlogs are processed gradually across runs.
-
-Optional long-term aging still applies via `ENTRY_EXPIRATION_DAYS` (default 365, fetcher maintenance) to trim truly old data if you run this for months.
-
-feeds.yaml snippet (still supports thresholds for the time window & bulletin retention days):
-
-```yaml
-thresholds:
-  time_window_hours: 48    # summarizer input recency filter
-  retention_days: 7        # bulletin & legacy aging (raw item day purge now superseded by count-based pruning)
-```
-
-Environment overrides (set in `.env` or shell):
-
-```bash
-MAX_ITEMS_PER_FEED=400        # per-feed physical cap
-SUMMARY_WINDOW_ITEMS=50       # per-feed prompt size cap
-```
-
-Operational guidance:
-
-- If some feeds are extremely high volume, lower `MAX_ITEMS_PER_FEED` (e.g. 200) for faster turnover.
-- To accelerate clearing a backlog, temporarily raise `SUMMARY_WINDOW_ITEMS` (e.g. to 80) then revert to keep prompts small.
-- For historical bulk summarization, raise `time_window_hours` first; count cap ensures DB won't explode.
-- High-fanout bulletin groups can now drain backlog fairly: adjust `BULLETIN_SUMMARY_LIMIT` (per chunk), `BULLETIN_PER_FEED_LIMIT` (per feed) and `BULLETIN_MAX_CHUNKS` (safety cap) so quieter feeds still get airtime even when paired with firehoses.
-
-Edge cases:
-
-- Feeds with no reliable pub dates fall back to ingestion timestamp; count-based retention ensures they stay recorded and won't churn.
-- If Azure content filtering splits batches, the bisect logic still respects the summary window (post-filter items consume part of the window as usual).
-
-Adjust these values and restart to apply. The fetcher handles pruning; the summarizer reads window sizes dynamically each pass.
-
-## 10. Roadmap Snapshot
-
-- Expand test coverage (`pytest`: fetcher scheduling, scheduler, Azure upload paths)
-- Harden HTML sanitization (allowlist schemes/attributes)
-- Optional container image & `pyproject.toml` packaging
+- [CONFIGURATION](docs/CONFIGURATION.md) (env vars, secrets, scheduling)
+- [RUNNING](docs/RUNNING.md) (CLI modes, flags, scheduling)
+- [PUBLISHING](docs/PUBLISHING.md) (output paths, Azure upload)
+- [TELEMETRY](docs/TELEMETRY.md) (OpenTelemetry + Azure exporter)
+- [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) (common symptoms and fixes)
+- [ARCHITECTURE](docs/ARCHITECTURE.md) (module map and pipeline flow)
+- [MERGE_TUNING](docs/MERGE_TUNING.md) (dedupe/merge behavior and diagnostics)
+- [RETENTION](docs/RETENTION.md) (age window & retention controls)
+- [SPEC](docs/SPEC.md) (long-form architecture/runtime spec)
 
 ---
 
