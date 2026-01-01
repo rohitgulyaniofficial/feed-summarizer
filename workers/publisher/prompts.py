@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from aiohttp import ClientSession
 
-from config import config, get_logger
+from config import get_logger
 from workers.publisher.merge import collect_summary_links
 
 logger = get_logger("publisher.prompts")

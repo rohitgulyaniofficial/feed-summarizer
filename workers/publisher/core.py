@@ -8,14 +8,14 @@ published within a 4-hour time window, with AI-generated introductions.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import importlib
 from pathlib import Path
 from aiohttp import ClientSession
 
 # Import configuration, models, and shared utilities
 from config import config, get_logger
-from services.telemetry import init_telemetry, get_tracer, trace_span
+from services.telemetry import trace_span
 from services.llm_client import chat_completion as default_ai_chat_completion
 from models import DatabaseQueue
 from workers.publisher.settings import (
@@ -23,7 +23,6 @@ from workers.publisher.settings import (
     load_prompts,
     normalize_summary_group_entry,
 )
-from workers.publisher.templates import env
 from workers.publisher.merge import synthesize_merged_summary, merge_similar_summaries
 from workers.publisher.prompts import (
     generate_markdown_bulletin,
@@ -33,7 +32,6 @@ from workers.publisher.prompts import (
 )
 from workers.publisher.bulletin_orchestrator import publish_html_bulletin_chunks
 from workers.publisher.rss_pipeline import publish_group_rss
-from workers.publisher.html_renderer import generate_bulletin_html
 from workers.publisher.bulletins import (
     build_recent_bulletins as build_recent_bulletins_helper,
     extract_bulletin_file_title,
@@ -281,6 +279,7 @@ class RSSPublisher:
             prompts=self.prompts,
             db=self.db,
             enable_intro=enable_intro,
+            llm_enabled=bool(config.AZURE_ENDPOINT and config.OPENAI_API_KEY),
             get_published_summaries_by_date=self.get_published_summaries_by_date,
             ai_chat_completion_fn=_get_ai_chat_completion(),
             generate_markdown_bulletin=self._generate_markdown_bulletin,

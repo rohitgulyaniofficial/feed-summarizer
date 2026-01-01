@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ title_text or summary_group.title() }} News Summary</title>
+    <link rel="alternate" type="application/rss+xml" title="{{ (title_text or summary_group.title()) ~ ' RSS' }}" href="/feeds/{{ summary_group }}.xml">
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -128,7 +129,7 @@
             </div>
             <div class="summary-meta">
                 <span class="summary-date">
-                    {% if summary.feed_slug %}Source: {{ summary.feed_slug }}{% endif %}
+                    {% if summary.feed_slug %}Source: {{ summary.feed_display_name or summary.feed_label or summary.feed_title or summary.feed_slug }}{% endif %}
                     {% if summary.merged_count and summary.merged_count > 1 %} • {{ summary.merged_count }} related sources{% endif %}
                     {% if summary.item_date %} • Published: {{ summary.item_date.strftime('%B %d, %Y') }}{% endif %}
                 </span>
@@ -146,7 +147,7 @@
         <p>
             <strong>Total summaries:</strong> {{ summaries|length }} • 
             <strong>Topics covered:</strong> {{ topic_count }} • 
-            <strong>Last updated:</strong> {{ current_time.strftime('%B %d, %Y at %H:%M UTC') }}
+            <strong>Last updated:</strong> {{ current_time.strftime('%B %d, %Y at %H:%M UTC') }} by <a href="https://github.com/rcarmo/feed-summarizer">Feed Summarizer</a>
         </p>
     </div>
 </body>

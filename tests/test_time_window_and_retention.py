@@ -1,6 +1,4 @@
-import asyncio
-import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import pytest
 
 from models import DatabaseQueue
@@ -40,7 +38,6 @@ async def test_time_window_filter_and_retention(tmp_path):
         assert 'Three Day Item' not in titles
 
         # Force retention_days small for test purge
-        original_retention = getattr(config, 'RETENTION_DAYS', 7)
         config.RETENTION_DAYS = 2
         deleted = await db.execute('expire_old_entries', expiration_days=config.RETENTION_DAYS)
         assert deleted >= 1  # At least the three-day item should be deleted

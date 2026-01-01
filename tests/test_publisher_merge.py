@@ -1,4 +1,3 @@
-import pytest
 
 from workers.publisher.merge import merge_summaries
 

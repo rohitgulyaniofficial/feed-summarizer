@@ -9,7 +9,7 @@ from json import loads, JSONDecodeError
 from time import time
 import traceback
 from asyncio import create_task, get_event_loop, sleep, wait_for, TimeoutError, CancelledError, Semaphore, gather
-from aiohttp import ClientSession, ClientError, ClientTimeout, ClientResponseError
+from aiohttp import ClientSession
 from datetime import datetime
 from functools import partial
 from urllib.parse import urlparse
@@ -22,10 +22,10 @@ import yaml
 # Import configuration, models, and shared utilities
 from config import config, get_logger
 from services.llm_client import chat_completion as ai_chat_completion
-from services.llm_client import ContentFilterError
+from services.llm_client import ContentFilterError, TokenLimitError
 from services.telemetry import init_telemetry, get_tracer, trace_span
 from models import DatabaseQueue
-from utils import RateLimiter, RetryHelper, compute_simhash, encode_int64
+from utils import RateLimiter, RetryHelper, compute_simhash
 
 # Module-specific logger
 logger = get_logger("summarizer")
@@ -151,7 +151,6 @@ def load_prompts() -> Dict[str, str]:
 CONTENT_TRIM_WORDS = 300  # Maximum words to send to AI for processing
 DEFAULT_RATE_LIMIT_WAIT = 60  # Default wait time for rate limiting (seconds)
 CONCURRENT_FEEDS_LIMIT = 2  # Maximum concurrent feed processing
-FEED_PROCESSING_DELAY = 5  # Delay between feed processing (seconds)
 
 # Regular expressions for cleaning up Markdown
 MD_HEADING_PATTERN = re.compile(r'^#+\s+', re.MULTILINE)
@@ -444,7 +443,7 @@ class NewsProcessor:
                 return md, ids, sums, []
             # No ids but no filter: nothing to do
             return "", [], {}, []
-        except ContentFilterError as cf:
+        except ContentFilterError:
             if n == 1:
                 # Single offending item; skip it
                 off_id = items_subset[0]['id']
@@ -462,6 +461,28 @@ class NewsProcessor:
             merged_ids = ids_l + ids_r
             merged_sums = {**sums_l, **sums_r}
             merged_filt = filt_l + filt_r
+            return merged_md, merged_ids, merged_sums, merged_filt
+        except TokenLimitError as e:
+            if n == 1:
+                # Single item but still too large; skip with warning
+                off_id = items_subset[0]['id']
+                logger.error(f"Single item exceeds token limit: id={off_id}, title='{items_subset[0]['title']}', error: {e}")
+                return "", [], {}, [off_id]
+            # Split and recurse to reduce batch size
+            mid = n // 2
+            logger.warning(f"Token limit exceeded with {n} items. Splitting into batches of {mid} and {n - mid}")
+            left = items_subset[:mid]
+            right = items_subset[mid:]
+            md_l, ids_l, sums_l, filt_l = await self._bisect_summarize(left, session, url_ids, title_ids)
+            md_r, ids_r, sums_r, filt_r = await self._bisect_summarize(right, session, url_ids, title_ids)
+            # Merge results
+            merged_md = "".join([md_l, md_r])
+            merged_ids = ids_l + ids_r
+            merged_sums = {**sums_l, **sums_r}
+            merged_filt = filt_l + filt_r
+            # Log successful fallback at this level
+            if merged_ids:
+                logger.info(f"Token limit fallback: successfully processed {len(merged_ids)} items from split batch of {n} items")
             return merged_md, merged_ids, merged_sums, merged_filt
 
     async def group_by_topic_and_generate_markdown(self, json_content: str, url_ids: Dict[int, str], title_ids: Dict[int, str]) -> Tuple[str, List[Any], Dict[Any, Tuple[str, str, Optional[int], Optional[int]]]]:
@@ -537,13 +558,13 @@ class NewsProcessor:
                 
                 # Store the summary text, topic, and fingerprints for database insertion.
                 # - simhash: legacy/source fingerprint (body preferred)
-                # - merge_simhash: stable merge fingerprint (title + summary)
+                # - merge_simhash: stable merge fingerprint (summary only - titles ignored)
                 summary_text = item.get('summary', '')
                 body_text = item.get('body') or ''
                 simhash_source = body_text or summary_text
                 simhash_value = compute_simhash(simhash_source) if simhash_source else None
-                title_text = (title_ids.get(original_id) or '').strip()
-                merge_source = f"{title_text}\n{summary_text}".strip()
+                # merge_simhash uses only summary - titles add noise from varying sources
+                merge_source = (summary_text or "").strip()
                 merge_simhash_value = compute_simhash(merge_source) if merge_source else None
                 summaries_dict[original_id] = (
                     summary_text,
@@ -663,7 +684,7 @@ class NewsProcessor:
                     # If we get here, API call succeeded but returned no content or failed to parse
                     break
                     
-                except ContentFilterError as cf:
+                except ContentFilterError:
                     # Use bisect strategy to salvage safe items and add placeholders for filtered ones
                     logger.warning(f"Content filter encountered for feed {slug}. Attempting to bisect items to find safe subset.")
                     md_b, ids_b, sums_b, filtered_ids = await self._bisect_summarize(formatted_items, session, url_ids, title_ids)
@@ -704,6 +725,27 @@ class NewsProcessor:
 
                     # Return count of actually summarized items (placeholders are not marked as summarized)
                     return marked_count
+                except TokenLimitError as e:
+                    # Token limit exceeded - use bisect strategy to split the batch
+                    logger.warning(f"Token limit exceeded for feed {slug} with {len(formatted_items)} items. Using bisect strategy to split batch. Error: {e}")
+                    md_b, ids_b, sums_b, filtered_ids = await self._bisect_summarize(formatted_items, session, url_ids, title_ids)
+
+                    if md_b or ids_b:
+                        # We successfully processed at least some items
+                        if md_b:
+                            self.generate_summary_feed(md_b, feed_title)
+                        if ids_b:
+                            marked_count = await self.db.execute('verify_and_mark_as_summarized', ids=ids_b, summaries=sums_b)
+                            if feed_id:
+                                await self.db.execute('reset_feed_error', feed_id=feed_id)
+                            logger.info(f"✅ Token limit fallback successful: processed {len(ids_b)}/{len(formatted_items)} items after batch splitting for feed {slug}")
+                            return marked_count
+                    
+                    # If bisect also failed completely
+                    logger.error(f"Failed to process any items for feed {slug} even after batch splitting")
+                    if filtered_ids:
+                        logger.warning(f"Skipped {len(filtered_ids)} items due to token limits: {filtered_ids}")
+                    break
                 except JSONDecodeError as e:
                     retries += 1
                     if retries > config.SUMMARIZER_MAX_RETRIES:
@@ -771,8 +813,6 @@ class NewsProcessor:
             async def process_with_semaphore(slug):
                 async with semaphore:
                     await self.process_feed(slug, session)
-                    # Add a delay between feeds to avoid overwhelming the API
-                    await sleep(FEED_PROCESSING_DELAY)
             
             # Create tasks for all feeds
             tasks = []

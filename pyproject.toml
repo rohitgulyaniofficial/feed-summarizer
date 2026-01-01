@@ -1,0 +1,25 @@
+[tool.ruff]
+# Keep this intentionally minimal: catch real bugs (syntax/name errors, unused vars/imports)
+# without forcing stylistic rewrites.
+line-length = 120
+
+# Adjust if you run a different baseline.
+target-version = "py311"
+
+# Match common generated/artifact folders in this repo.
+extend-exclude = [
+    "__pycache__",
+    ".venv",
+    "public",
+]
+
+[tool.ruff.lint]
+# Roughly equivalent to a conservative Flake8 setup.
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+]
+
+# If you later enable import sorting ("I"), do it intentionally.

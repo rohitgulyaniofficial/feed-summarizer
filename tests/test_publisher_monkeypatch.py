@@ -1,4 +1,3 @@
-import pytest
 import workers.publisher as pkg
 
 from workers.publisher import core as publisher_core

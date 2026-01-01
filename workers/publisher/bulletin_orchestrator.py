@@ -1,5 +1,5 @@
 """HTML bulletin orchestration helpers."""
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, List
 
 from config import get_logger
 

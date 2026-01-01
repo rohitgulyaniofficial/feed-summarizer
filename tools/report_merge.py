@@ -19,6 +19,8 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import json
+import logging
 import os
 import re
 import sqlite3
@@ -26,39 +28,37 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from utils.hashed_cosine import build_hashed_tf_vector, cosine_similarity
-from utils.clustering import cluster_indices
-from utils.merge_policy import (
+# Suppress config logging noise (must be set before importing config)
+os.environ.setdefault("LOG_LEVEL", "ERROR")  # noqa: E402
+logging.getLogger("FeedProcessor").setLevel(logging.ERROR)
+
+from rich.console import Console  # noqa: E402
+from rich.table import Table  # noqa: E402
+from rich.panel import Panel  # noqa: E402
+from rich.text import Text  # noqa: E402
+
+from utils.hashed_cosine import build_hashed_tf_vector, cosine_similarity  # noqa: E402
+from utils.clustering import cluster_indices  # noqa: E402
+from utils.merge_policy import (  # noqa: E402
     merge_fingerprint_from_text,
     pair_merge_threshold_rows,
     should_merge_pair_rows,
     summary_token_set_from_text,
     title_token_set_from_text,
 )
-from utils.bm25_merge import (
+from utils.bm25_merge import (  # noqa: E402
     bm25_candidates as shared_bm25_candidates,
-    bm25_match_query_row as shared_bm25_match_query_row,
     bm25_ratio_map_for_items as shared_bm25_ratio_map_for_items,
     fts_available as shared_fts_available,
 )
-from utils import decode_int64, hamming_distance
+from utils import decode_int64, hamming_distance  # noqa: E402
+from tools.merge_env import _env_bool, _env_int, _env_float, _hashed_cosine_env_settings  # noqa: E402
+from tools.standard_args import (  # noqa: E402
+    create_standard_parser,
+    compute_lookback,
+)
 
-
-def _hashed_cosine_env_settings() -> Tuple[bool, float, int, int]:
-    enabled = _env_bool("HASHED_COSINE_ENABLED", False)
-    min_sim = _env_float("HASHED_COSINE_MIN_SIM", 0.25)
-    if min_sim < 0:
-        min_sim = 0.0
-    if min_sim > 1:
-        min_sim = 1.0
-    buckets = _env_int("HASHED_COSINE_BUCKETS", 65536)
-    if buckets <= 0:
-        buckets = 65536
-    max_tokens = _env_int("HASHED_COSINE_MAX_TOKENS", 128)
-    if max_tokens <= 0:
-        max_tokens = 128
-    return enabled, float(min_sim), int(buckets), int(max_tokens)
-
+console = Console()
 BulletinKey = Tuple[str, str, int]
 SummaryRow = Dict[str, Any]
 
@@ -74,14 +74,12 @@ def _summaries_has_merge_simhash(conn: sqlite3.Connection) -> bool:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Report which bulletin items would merge under simhash")
-    parser.add_argument("--db", dest="db_path", default="feeds.db", help="Path to SQLite DB (default: feeds.db)")
-    parser.add_argument("--hours", type=int, default=24, help="Look back this many hours (default: 24)")
-    parser.add_argument(
-        "--threshold",
-        type=int,
-        default=12,
-        help="Max SimHash Hamming distance for merging (default: 12)",
+    parser = create_standard_parser(
+        description="Report which bulletin items would merge under simhash",
+        with_db=True,
+        with_verbosity=False,
+        with_time_window=True,
+        with_threshold=True,
     )
     parser.add_argument(
         "--linkage",
@@ -187,6 +185,16 @@ def parse_args() -> argparse.Namespace:
         default=-1,
         help="Override BM25 max query tokens (default: use env BM25_MERGE_MAX_QUERY_TOKENS)",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output results in JSON format (machine-readable)",
+    )
+    parser.add_argument(
+        "--no-summaries",
+        action="store_true",
+        help="Hide summary text in cluster examples (show titles only)",
+    )
     return parser.parse_args()
 
 
@@ -223,7 +231,7 @@ def _cluster_candidates(
         b = candidates[j]
         if not eligible(a, b):
             return None
-        return int(_pair_merge_threshold(a, b, int(threshold)))
+        return int(pair_merge_threshold_rows(a, b, int(threshold)))
 
     linkage_norm = str(linkage or "complete").strip().lower()
     clusters_idx = cluster_indices(len(candidates), linkage_norm, get_dist, get_thr)
@@ -288,66 +296,6 @@ def _bm25_ratio_map_for_items(
     return shared_bm25_ratio_map_for_items(conn, items, bm25_max_tokens, bm25_limit)
 
 
-def _title_token_set(title: str) -> Set[str]:
-    return title_token_set_from_text(title)
-
-
-def _merge_fingerprint(title: str, summary_text: str) -> Optional[int]:
-    return merge_fingerprint_from_text(title, summary_text)
-
-
-def _summary_token_set(summary_text: str) -> Set[str]:
-    return summary_token_set_from_text(summary_text)
-
-
-def _should_merge_pair(a: SummaryRow, b: SummaryRow) -> bool:
-    return should_merge_pair_rows(a, b)
-
-
-def _pair_merge_threshold(a: SummaryRow, b: SummaryRow, base_threshold: int) -> int:
-    """Adaptive SimHash threshold for a candidate pair.
-
-    SimHash is approximate and can miss near-duplicates by a small margin.
-    If overlap is very strong, allow a +1 near-miss.
-    """
-    return pair_merge_threshold_rows(a, b, base_threshold)
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except Exception:
-        return default
-
-
-def _fts_available(conn: sqlite3.Connection) -> bool:
-    return shared_fts_available(conn)
-
-
-def _bm25_match_query(row: SummaryRow, max_tokens: int) -> str:
-    return shared_bm25_match_query_row(row, max_tokens)
-
-
 def _bm25_candidates(
     conn: sqlite3.Connection,
     query_id: int,
@@ -408,9 +356,9 @@ def load_recent_bulletin_summaries(conn: sqlite3.Connection, cutoff_epoch: int) 
             "title": title,
             "url": str(r["item_url"] or ""),
             "summary_text": summary_text,
-            "merge_fp": stored_fp if isinstance(stored_fp, int) else _merge_fingerprint(title, summary_text),
-            "title_tokens": _title_token_set(title),
-            "summary_tokens": _summary_token_set(summary_text),
+            "merge_fp": stored_fp if isinstance(stored_fp, int) else merge_fingerprint_from_text(title, summary_text),
+            "title_tokens": title_token_set_from_text(title),
+            "summary_tokens": summary_token_set_from_text(summary_text),
         }
         key: BulletinKey = (
             str(r["group_name"]),
@@ -431,7 +379,7 @@ def load_recent_keyword_matches(
     """Load recent summaries whose title or summary_text match the keyword.
 
     Uses the stored summaries.merge_simhash when available (decoded to unsigned 64-bit).
-    Falls back to computing SimHash from title + summary_text when missing.
+    Falls back to computing SimHash from summary_text when missing.
     """
     conn.row_factory = sqlite3.Row
     needle = f"%{(keyword or '').strip()}%"
@@ -466,7 +414,7 @@ def load_recent_keyword_matches(
         if isinstance(stored, int):
             fp = decode_int64(stored)
         else:
-            fp = _merge_fingerprint(title, summary_text)
+            fp = merge_fingerprint_from_text(title, summary_text)
         matches.append(
             {
                 "id": int(r["summary_id"]),
@@ -554,7 +502,7 @@ def load_recent_keyword_matches_detailed(
         if isinstance(stored, int):
             fp = decode_int64(stored)
         else:
-            fp = _merge_fingerprint(title, summary_text)
+            fp = merge_fingerprint_from_text(title, summary_text)
 
         row: SummaryRow = {
             "id": int(r["summary_id"]),
@@ -564,8 +512,8 @@ def load_recent_keyword_matches_detailed(
             "summary_text": summary_text,
             "merge_fp": fp,
             "generated_date": int(r["generated_date"] or 0),
-            "title_tokens": _title_token_set(title),
-            "summary_tokens": _summary_token_set(summary_text),
+            "title_tokens": title_token_set_from_text(title),
+            "summary_tokens": summary_token_set_from_text(summary_text),
         }
         out.append(row)
         if len(out) >= int(limit):
@@ -637,9 +585,9 @@ def load_recent_bulletin_keyword_matches(
             "title": title,
             "url": str(r["item_url"] or ""),
             "summary_text": summary_text,
-            "merge_fp": stored_fp if isinstance(stored_fp, int) else _merge_fingerprint(title, summary_text),
-            "title_tokens": _title_token_set(title),
-            "summary_tokens": _summary_token_set(summary_text),
+            "merge_fp": stored_fp if isinstance(stored_fp, int) else merge_fingerprint_from_text(title, summary_text),
+            "title_tokens": title_token_set_from_text(title),
+            "summary_tokens": summary_token_set_from_text(summary_text),
         }
         key: BulletinKey = (
             str(r["group_name"]),
@@ -707,7 +655,7 @@ def print_keyword_bulletin_pair_report(
         bm25_max_tokens = 8
     bm25_limit = 10
 
-    fts_ok = _fts_available(conn)
+    fts_ok = shared_fts_available(conn)
     if bm25_enabled:
         print(
             f"BM25 enabled: fts={fts_ok} ratio>={bm25_ratio_threshold:.2f} extra_dist={bm25_max_extra} query_tokens={bm25_max_tokens} topk={bm25_limit}"
@@ -742,7 +690,7 @@ def print_keyword_bulletin_pair_report(
                 dist = hamming_distance(a.get("merge_fp"), b.get("merge_fp"))
                 dist_sort = int(dist) if dist is not None else 999
                 overlap = len((a.get("title_tokens") or set()) & (b.get("title_tokens") or set()))
-                eligible = _should_merge_pair(a, b)
+                eligible = should_merge_pair_rows(a, b)
 
                 cos_val: Optional[float] = None
                 cos_ok = True
@@ -758,7 +706,7 @@ def print_keyword_bulletin_pair_report(
                     ra = bm25_ratios.get(sid_a, {}).get(sid_b)
                     rb = bm25_ratios.get(sid_b, {}).get(sid_a)
 
-                pair_thr = _pair_merge_threshold(a, b, threshold) if eligible else int(threshold)
+                pair_thr = pair_merge_threshold_rows(a, b, threshold) if eligible else int(threshold)
                 simhash_merge = bool(eligible and dist is not None and int(dist) <= int(pair_thr) and cos_ok)
 
                 bm25_applicable = bool(dist is None or int(dist) <= int(pair_thr) + int(bm25_max_extra))
@@ -871,7 +819,7 @@ def print_keyword_bulletin_cluster_report(
         bm25_max_tokens = 8
     bm25_limit = 10
 
-    fts_ok = _fts_available(conn)
+    fts_ok = shared_fts_available(conn)
     print(f"\nKeyword-in-bulletin cluster report for '{keyword}' (threshold={threshold})")
     print(f"Sessions with >=2 matches: {len(sessions)}")
     if bm25_enabled:
@@ -909,7 +857,7 @@ def print_keyword_bulletin_cluster_report(
                 vec_by_id[sid] = build_hashed_tf_vector(text, buckets=cosine_buckets, max_tokens=cosine_max_tokens)
 
         def eligible_with_cos(a: SummaryRow, b: SummaryRow) -> bool:
-            if not _should_merge_pair(a, b):
+            if not should_merge_pair_rows(a, b):
                 return False
             if not cosine_enabled:
                 return True
@@ -968,7 +916,7 @@ def print_keyword_bulletin_cluster_report(
                     continue
 
                 dist = hamming_distance(a.get("merge_fp"), b.get("merge_fp"))
-                pair_thr = _pair_merge_threshold(a, b, threshold)
+                pair_thr = pair_merge_threshold_rows(a, b, threshold)
                 simhash_merge = bool(dist is not None and int(dist) <= int(pair_thr))
 
                 would_merge = simhash_merge
@@ -1063,7 +1011,7 @@ def print_keyword_global_cluster_report(
             vec_by_id[sid] = build_hashed_tf_vector(text, buckets=cosine_buckets, max_tokens=cosine_max_tokens)
 
     def eligible_with_cos(a: SummaryRow, b: SummaryRow) -> bool:
-        if not _should_merge_pair(a, b):
+        if not should_merge_pair_rows(a, b):
             return False
         if not cosine_enabled:
             return True
@@ -1147,7 +1095,7 @@ def print_keyword_global_cluster_report(
         bm25_max_tokens = 8
     bm25_limit = 10
 
-    fts_ok = _fts_available(conn)
+    fts_ok = shared_fts_available(conn)
     if bm25_enabled:
         print(
             f"BM25 enabled: fts={fts_ok} ratio>={bm25_ratio_threshold:.2f} extra_dist={bm25_max_extra} query_tokens={bm25_max_tokens} topk={bm25_limit}"
@@ -1168,7 +1116,7 @@ def print_keyword_global_cluster_report(
             if not eligible_with_cos(a, b):
                 continue
             dist = hamming_distance(a.get("merge_fp"), b.get("merge_fp"))
-            pair_thr = _pair_merge_threshold(a, b, threshold)
+            pair_thr = pair_merge_threshold_rows(a, b, threshold)
             simhash_merge = bool(dist is not None and int(dist) <= int(pair_thr))
             would_merge = simhash_merge
             if not would_merge and bm25_enabled:
@@ -1286,7 +1234,7 @@ def _build_clusters(items: Sequence[SummaryRow], threshold: int, linkage: str) -
         items,
         int(threshold),
         linkage_norm,
-        _should_merge_pair,
+        should_merge_pair_rows,
         fp_field="merge_fp",
     )
 
@@ -1308,9 +1256,12 @@ def _max_pairwise_distance(group: Sequence[SummaryRow]) -> int:
 def main() -> None:
     args = parse_args()
     threshold = max(0, int(args.threshold))
-    cutoff = int(time.time()) - int(args.hours) * 3600
+    
+    # Compute cutoff using shared helper
+    lookback_hours, lookback_label = compute_lookback(args)
+    cutoff = int(time.time()) - lookback_hours * 3600
 
-    conn = sqlite3.connect(args.db_path)
+    conn = sqlite3.connect(args.db)
 
     query = (args.query or "").strip()
     if query:
@@ -1417,48 +1368,156 @@ def main() -> None:
     # BulletinKey is a plain tuple: (group_name, session_key, created_date)
     session_rows.sort(key=lambda t: (-t[0], t[1][0], t[1][1]))
 
-    print(f"Merge eligibility report (last {args.hours}h, threshold={threshold})")
-    print(f"Bulletins scanned: {total_bulletins}")
-    print(f"Items before: {total_before}")
-    print(f"Items after (if merged at render time): {total_after}")
-    print(f"Net reduction: {total_before - total_after}")
-    print(f"Merged clusters: {total_clusters} (total merged items involved: {total_merged_items})")
+    reduction_pct = ((total_before - total_after) / total_before * 100) if total_before > 0 else 0
 
-    print("\nTop sessions by reduction:")
-    shown = 0
-    keyword = (args.keyword or "").strip().lower()
+    # JSON output mode
+    if getattr(args, "json", False):
+        keyword = (args.keyword or "").strip().lower()
+        output = {
+            "lookback": lookback_label,
+            "threshold": threshold,
+            "summary": {
+                "bulletins_scanned": total_bulletins,
+                "items_before": total_before,
+                "items_after": total_after,
+                "net_reduction": total_before - total_after,
+                "reduction_percent": round(reduction_pct, 2),
+                "merged_clusters": total_clusters,
+                "merged_items": total_merged_items,
+            },
+            "sessions": [],
+        }
+        for reduction, key, before, after, clusters in session_rows[:int(args.top)]:
+            group_name, session_key, _created = key
+            session_data = {
+                "session": f"{group_name}/{session_key}",
+                "before": before,
+                "after": after,
+                "reduction": reduction,
+                "clusters": [],
+            }
+            for cluster in sorted(clusters, key=lambda c: -len(c)):
+                cluster_sorted = sorted(cluster, key=lambda r: (str(r.get("feed_slug") or ""), int(r.get("id") or 0)))
+                if keyword:
+                    blob = " ".join([str(r.get("title") or "") for r in cluster_sorted]).lower()
+                    if keyword not in blob:
+                        continue
+                max_d = _max_pairwise_distance(cluster_sorted)
+                session_data["clusters"].append({
+                    "size": len(cluster_sorted),
+                    "max_distance": max_d,
+                    "items": [
+                        {"id": r.get("id"), "feed": r.get("feed_slug"), "title": str(r.get("title") or "").strip()}
+                        for r in cluster_sorted
+                    ],
+                })
+            output["sessions"].append(session_data)
+        print(json.dumps(output, indent=2))
+        return
 
-    for reduction, key, before, after, clusters in session_rows:
-        group_name, session_key, _created = key
-        print(f"- {group_name}/{session_key}  {before} -> {after}  (reduction={reduction}, clusters={len(clusters)})")
+    # Rich formatted header
+    console.print(Panel.fit(
+        f"Merge Eligibility Report (last {lookback_label})",
+        style="bold cyan"
+    ))
 
-        # Print examples (up to 2 clusters), optionally filtered by keyword.
-        examples = 0
-        for cluster in sorted(clusters, key=lambda c: -len(c)):
-            if examples >= 2:
+    # Summary table
+    summary_table = Table(show_header=False, box=None, padding=(0, 2))
+    summary_table.add_column("Metric", style="dim")
+    summary_table.add_column("Value", style="bold")
+    
+    summary_table.add_row("Threshold", str(threshold))
+    summary_table.add_row("Bulletins scanned", str(total_bulletins))
+    summary_table.add_row("Items before merge", str(total_before))
+    summary_table.add_row("Items after merge", str(total_after))
+    summary_table.add_row("Net reduction", f"{total_before - total_after} ({reduction_pct:.1f}%)")
+    summary_table.add_row("Merged clusters", f"{total_clusters} ({total_merged_items} items)")
+    
+    console.print(summary_table)
+    console.print()
+
+    # Sessions table
+    if session_rows:
+        console.print(Panel.fit("Top Sessions by Reduction", style="bold green"))
+        
+        sessions_table = Table(show_header=True, header_style="bold")
+        sessions_table.add_column("Session", style="cyan")
+        sessions_table.add_column("Before", justify="right")
+        sessions_table.add_column("After", justify="right")
+        sessions_table.add_column("Δ", justify="right", style="green")
+        sessions_table.add_column("Clusters", justify="right")
+        
+        shown = 0
+        keyword = (args.keyword or "").strip().lower()
+        
+        for reduction, key, before, after, clusters in session_rows:
+            group_name, session_key, _created = key
+            sessions_table.add_row(
+                f"{group_name}/{session_key}",
+                str(before),
+                str(after),
+                f"-{reduction}",
+                str(len(clusters))
+            )
+            shown += 1
+            if shown >= int(args.top):
                 break
-            cluster_sorted = sorted(cluster, key=lambda r: (str(r.get("feed_slug") or ""), int(r.get("id") or 0)))
-            max_d = _max_pairwise_distance(cluster_sorted)
+        
+        console.print(sessions_table)
+        console.print()
 
-            if keyword:
-                blob = " ".join([str(r.get("title") or "") for r in cluster_sorted]).lower()
-                if keyword not in blob:
-                    continue
+        # Detailed cluster examples
+        console.print(Panel.fit("Merge Cluster Examples", style="bold yellow"))
+        
+        shown = 0
+        for reduction, key, before, after, clusters in session_rows:
+            group_name, session_key, _created = key
+            
+            examples = 0
+            for cluster in sorted(clusters, key=lambda c: -len(c)):
+                if examples >= 2:
+                    break
+                cluster_sorted = sorted(cluster, key=lambda r: (str(r.get("feed_slug") or ""), int(r.get("id") or 0)))
+                max_d = _max_pairwise_distance(cluster_sorted)
 
-            print(f"    cluster size={len(cluster_sorted)} max_dist={max_d}")
-            for r in cluster_sorted:
-                title = (str(r.get("title") or "")).strip().replace("\n", " ")
-                if len(title) > 110:
-                    title = title[:107] + "..."
-                print(f"      - [{r.get('feed_slug')}] #{r.get('id')} {title}")
-            examples += 1
+                if keyword:
+                    blob = " ".join([str(r.get("title") or "") for r in cluster_sorted]).lower()
+                    if keyword not in blob:
+                        continue
 
-        shown += 1
-        if shown >= int(args.top):
-            break
+                # Create cluster display
+                cluster_text = Text()
+                cluster_text.append(f"{group_name}/{session_key}", style="cyan")
+                cluster_text.append(f"  size={len(cluster_sorted)} max_dist={max_d}", style="dim")
+                console.print(cluster_text)
+                
+                for r in cluster_sorted:
+                    title = (str(r.get("title") or "")).strip().replace("\n", " ")
+                    if len(title) > 90:
+                        title = title[:87] + "..."
+                    feed = r.get('feed_slug', 'unknown')
+                    console.print(f"  [dim]•[/dim] [magenta]\\[{feed}][/magenta] {title}")
+                    
+                    # Show summary by default (unless --no-summaries)
+                    if not getattr(args, 'no_summaries', False):
+                        summary = (str(r.get("summary_text") or "")).strip().replace("\n", " ")
+                        if summary:
+                            # Wrap summary text for readability
+                            if len(summary) > 200:
+                                summary = summary[:197] + "..."
+                            console.print(f"    [dim italic]{summary}[/dim italic]")
+                
+                console.print()
+                examples += 1
 
-    if keyword:
-        print(f"\n(Examples filtered by keyword: {args.keyword})")
+            shown += 1
+            if shown >= min(int(args.top), 10):  # Limit detailed examples
+                break
+
+        if keyword:
+            console.print(f"\n[dim](Examples filtered by keyword: {args.keyword})[/dim]")
+    else:
+        console.print("[green]No merge candidates found - all items are unique![/green]")
 
 
 if __name__ == "__main__":

@@ -10,20 +10,22 @@ for accessing configuration values throughout the application.
 from os import environ, path, access, R_OK
 from typing import Dict, Any
 from logging import getLogger, basicConfig, StreamHandler, INFO, DEBUG, WARNING, ERROR
+from functools import lru_cache
 import sys
 import yaml
 from dotenv import load_dotenv
 
+
 def _setup_global_logger():
     """Setup a single global logger for the entire application.
-    
+
     This function configures the logging system for the entire feed processor application.
     It sets up a unified logging configuration that can be controlled via environment variables:
-    
+
     Environment Variables:
         LOG_LEVEL: Set log level (DEBUG, INFO, WARNING, ERROR) - defaults to INFO
         LOG_TIMESTAMPS: Enable/disable timestamps in logs (true/false) - defaults to true
-    
+
     The logger outputs to stdout with line buffering for real-time logging.
     All modules should use get_logger() to create module-specific loggers that inherit this configuration.
     """
@@ -35,31 +37,26 @@ def _setup_global_logger():
 
     # Determine log level
     level_str = environ.get("LOG_LEVEL", "INFO").upper()
-    level_map = {
-        "DEBUG": DEBUG,
-        "INFO": INFO, 
-        "WARNING": WARNING,
-        "ERROR": ERROR
-    }
+    level_map = {"DEBUG": DEBUG, "INFO": INFO, "WARNING": WARNING, "ERROR": ERROR}
     level = level_map.get(level_str, INFO)
-    
+
     # Check if timestamps should be disabled
     show_timestamps = environ.get("LOG_TIMESTAMPS", "true").lower() != "false"
-    
+
     # Format: with or without timestamps
     if show_timestamps:
-        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     else:
-        log_format = '%(name)s - %(levelname)s - %(message)s'
-    
+        log_format = "%(name)s - %(levelname)s - %(message)s"
+
     # Setup basic configuration with unbuffered stdout/stderr
     basicConfig(
         level=level,
         format=log_format,
         handlers=[StreamHandler(sys.stdout)],
-        force=True  # Force reconfiguration if already configured
+        force=True,  # Force reconfiguration if already configured
     )
-    
+
     # Ensure unbuffered output
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
@@ -82,44 +79,47 @@ def _setup_global_logger():
     except Exception:
         # Never fail app startup due to logging tweaks
         pass
-    
+
     return getLogger("FeedProcessor")
+
 
 def get_logger(name: str):
     """Get a module-specific logger with the unified configuration.
-    
+
     This function creates a logger with a name in the format "FeedProcessor.{name}".
     All loggers created this way inherit the global logging configuration set by _setup_global_logger().
-    
+
     Args:
         name: The logger name (e.g., "fetcher", "summarizer", "publisher")
-        
+
     Returns:
         A logger instance with the unified configuration
-        
+
     Example:
         logger = get_logger("mymodule")
         logger.info("This will appear as 'FeedProcessor.mymodule - INFO - This will appear...'")
     """
     return getLogger(f"FeedProcessor.{name}")
 
+
 # Create single global logger instance
 logger = _setup_global_logger()
 
+
 class Config:
     """Configuration manager for Feed Fetcher.
-    
+
     This class handles loading and validation of configuration from multiple sources:
     1. Environment variables
     2. .env file (if present)
     3. YAML secrets file (if SECRETS_FILE environment variable is set)
     4. feeds.yaml configuration file
-    
+
     The loading order ensures that:
     - .env file variables override system environment variables
     - Secrets file variables override both system and .env variables
     - This allows for secure management of sensitive configuration
-    
+
     Example secrets.yaml format:
     ```yaml
     environment:
@@ -129,24 +129,26 @@ class Config:
       AZURE_STORAGE_KEY: "your-storage-key"
     ```
     """
-    
+
     def __init__(self):
         """Initialize configuration with environment variables and validation."""
         self._load_environment()
         self._validate_and_set_config()
+        self.FEED_SOURCES: Dict[str, str] = {}
+        self.FEED_LABELS: Dict[str, str] = {}
         self._load_feed_sources()
-    
+
     def _load_environment(self):
         """Load environment variables from .env file and secrets file if present."""
         # Load .env file first
-        dotenv_path = path.join(path.dirname(path.abspath(__file__)), '.env')
+        dotenv_path = path.join(path.dirname(path.abspath(__file__)), ".env")
         if path.exists(dotenv_path):
             load_dotenv(dotenv_path)
             logger.info(f"Loaded environment variables from {dotenv_path}")
-        
+
         # Load secrets file if SECRETS_FILE environment variable is set
         self._load_secrets_file()
-    
+
     def _validate_positive_int(self, env_var: str, default: int, min_val: int = 1) -> int:
         """Validate and parse a positive integer environment variable."""
         try:
@@ -170,7 +172,7 @@ class Config:
         except (ValueError, TypeError):
             logger.warning(f"Invalid {env_var} value, using default {default}")
             return default
-    
+
     def _validate_and_set_config(self):
         """Validate and set all configuration values."""
         # Basic configuration
@@ -190,6 +192,10 @@ class Config:
         # Rate limiting and cooldown configuration
         self.MIN_COOLDOWN_PERIOD = self._validate_positive_int("MIN_COOLDOWN_PERIOD", 3600, 60)
         self.READER_MODE_REQUESTS_PER_MINUTE = self._validate_positive_int("READER_MODE_REQUESTS_PER_MINUTE", 10, 1)
+
+        # Backoff configuration (shared by fetcher and status reporting)
+        self.FETCH_BACKOFF_BASE_SECONDS = self._validate_positive_int("FETCH_BACKOFF_BASE_SECONDS", 3600, 1)
+        self.FETCH_BACKOFF_MAX_HOURS = self._validate_positive_int("FETCH_BACKOFF_MAX_HOURS", 24, 1)
 
         # Data management configuration
         self.ENTRY_EXPIRATION_DAYS = self._validate_positive_int("ENTRY_EXPIRATION_DAYS", 365, 1)
@@ -223,15 +229,32 @@ class Config:
         # Notes:
         # - The publisher applies additional guardrails (title/summary token overlap)
         #   to avoid accidental collisions.
-        # - With a stable merge fingerprint (title + summary) and conservative guardrails,
+        # - With a stable merge fingerprint (summary only) and conservative guardrails,
         #   a lower threshold tends to reduce false positives.
         try:
-            threshold = int(environ.get("SIMHASH_HAMMING_THRESHOLD", "24"))
+            threshold = int(environ.get("SIMHASH_HAMMING_THRESHOLD", "16"))
         except (ValueError, TypeError):
-            threshold = 24
+            threshold = 16
         if threshold < 0:
             threshold = 0
         self.SIMHASH_HAMMING_THRESHOLD = threshold
+
+        # Recurring coverage detection uses the same threshold as duplicate detection
+        # Both operate on summary-only fingerprints for consistency
+        try:
+            recurring_threshold = int(environ.get("RECURRING_HAMMING_THRESHOLD", "16"))
+        except (ValueError, TypeError):
+            recurring_threshold = 16
+        if recurring_threshold < 0:
+            recurring_threshold = 16
+        self.RECURRING_HAMMING_THRESHOLD = recurring_threshold
+
+        # Stopword locales for similarity matching and SimHash computation
+        # Comma-separated list of ISO 639-1 language codes (e.g., "en,pt,es,fr")
+        # Used by both token overlap guardrails and SimHash fingerprinting
+        # to filter common words that shouldn't influence similarity scoring.
+        stopword_locales_str = environ.get("STOPWORD_LOCALES", "en,pt").strip()
+        self.STOPWORD_LOCALES = [loc.strip() for loc in stopword_locales_str.split(",") if loc.strip()]
 
         # Optional BM25/FTS5 fallback matching
         # Conservative defaults: disabled unless explicitly enabled.
@@ -332,66 +355,66 @@ class Config:
         self.SCHEMA_FILE_PATH = path.join(base_dir, "models", "schema.sql")
         self.FEEDS_CONFIG_PATH = path.join(base_dir, "feeds.yaml")
         self.PROMPT_CONFIG_PATH = path.join(base_dir, "prompt.yaml")
-    
+
     def _load_secrets_file(self):
         """Load environment variable overrides from a YAML secrets file.
-        
-        If SECRETS_FILE environment variable is set, loads the specified YAML file
-        and sets environment variables from it. This allows for secure management
-        of sensitive configuration data.
-        
-    Expected YAML formats (both supported):
-        ```yaml
-    # Preferred: top-level mapping
-    AZURE_ENDPOINT: "https://your-resource.openai.azure.com/"
-    OPENAI_API_KEY: "your-api-key"
-    AZURE_STORAGE_ACCOUNT: "yourstorageaccount"
-    AZURE_STORAGE_KEY: "your-storage-key"
-        
-    # Backward-compatible: nested under `environment`
-    # environment:
-    #   AZURE_ENDPOINT: "https://your-resource.openai.azure.com/"
-    #   OPENAI_API_KEY: "your-api-key"
-    #   AZURE_STORAGE_ACCOUNT: "yourstorageaccount"
-    #   AZURE_STORAGE_KEY: "your-storage-key"
-        ```
+
+            If SECRETS_FILE environment variable is set, loads the specified YAML file
+            and sets environment variables from it. This allows for secure management
+            of sensitive configuration data.
+
+        Expected YAML formats (both supported):
+            ```yaml
+        # Preferred: top-level mapping
+        AZURE_ENDPOINT: "https://your-resource.openai.azure.com/"
+        OPENAI_API_KEY: "your-api-key"
+        AZURE_STORAGE_ACCOUNT: "yourstorageaccount"
+        AZURE_STORAGE_KEY: "your-storage-key"
+
+        # Backward-compatible: nested under `environment`
+        # environment:
+        #   AZURE_ENDPOINT: "https://your-resource.openai.azure.com/"
+        #   OPENAI_API_KEY: "your-api-key"
+        #   AZURE_STORAGE_ACCOUNT: "yourstorageaccount"
+        #   AZURE_STORAGE_KEY: "your-storage-key"
+            ```
         """
         secrets_file_path = environ.get("SECRETS_FILE")
         if not secrets_file_path:
             logger.info("SECRETS_FILE not set; relying on environment/.env for secrets")
             return
-        
+
         try:
             # Check if file exists and is accessible
             if not path.isfile(secrets_file_path):
                 logger.warning(f"Secrets file not found at {secrets_file_path}")
                 return
-            
+
             # Check if we have read permissions
             if not access(secrets_file_path, R_OK):
                 logger.error(f"No read permission for secrets file at {secrets_file_path}")
                 return
-            
+
             # Check file size to prevent reading extremely large files
             file_size = path.getsize(secrets_file_path)
             max_size = 2 * 1024 * 1024  # 2 MB limit for secrets file
             if file_size > max_size:
                 logger.error(f"Secrets file too large: {file_size} bytes (limit: {max_size} bytes)")
                 return
-                
-            with open(secrets_file_path, 'r') as f:
+
+            with open(secrets_file_path, "r") as f:
                 secrets_config = yaml.safe_load(f)
-                
+
             if not secrets_config:
                 logger.warning(f"Empty or invalid YAML in secrets file {secrets_file_path}")
                 return
-                
+
             # Determine mapping of environment variables (support top-level or nested 'environment')
             env_vars = None
             if isinstance(secrets_config, dict):
-                if isinstance(secrets_config.get('environment'), dict):
+                if isinstance(secrets_config.get("environment"), dict):
                     # Backward-compatible format
-                    env_vars = secrets_config['environment']
+                    env_vars = secrets_config["environment"]
                     logger.debug(f"Using 'environment' section from secrets file {secrets_file_path}")
                 else:
                     # Preferred top-level mapping
@@ -404,7 +427,7 @@ class Config:
             if not env_vars:
                 logger.warning(f"No environment variables found in secrets file {secrets_file_path}")
                 return
-            
+
             # Set environment variables from the secrets file
             secrets_loaded = 0
             for key, value in env_vars.items():
@@ -415,19 +438,24 @@ class Config:
                     logger.debug(f"Set environment variable {key} from secrets file")
                 else:
                     logger.warning(f"Skipping invalid environment variable in secrets file: {key}={value}")
-            
-            logger.info(f"Successfully loaded {secrets_loaded} environment variables from secrets file {secrets_file_path}")
-                
+
+            logger.info(
+                f"Successfully loaded {secrets_loaded} environment variables from secrets file {secrets_file_path}"
+            )
+
         except yaml.YAMLError as e:
             logger.error(f"Error parsing YAML in secrets file {secrets_file_path}: {e}")
         except Exception as e:
             logger.error(f"Error loading secrets file {secrets_file_path}: {e}")
-    
+
     # ------------------------------------------------------------------
     # Internal YAML loading helpers (deduplicate cloned safety logic)
     # ------------------------------------------------------------------
+    @lru_cache(maxsize=8)
     def _safe_read_yaml(self, file_path: str, max_size: int, kind: str) -> Any | None:
         """Safely read a YAML file with consistent validation.
+
+        Cached to avoid repeated parsing in test environments.
 
         Args:
             file_path: Path to the YAML file
@@ -448,7 +476,7 @@ class Config:
             if size > max_size:
                 logger.error(f"{kind.capitalize()} file too large: {size} bytes (limit: {max_size} bytes)")
                 return None
-            with open(file_path, 'r') as f:
+            with open(file_path, "r") as f:
                 data = yaml.safe_load(f)
             if not data:
                 logger.warning(f"Empty or invalid YAML in {kind} file {file_path}")
@@ -467,16 +495,17 @@ class Config:
         Idempotent and resilient: any failure results in an empty mapping.
         """
         feeds_path = self.FEEDS_CONFIG_PATH
-        config_data = self._safe_read_yaml(feeds_path, 5 * 1024 * 1024, 'feeds')
+        config_data = self._safe_read_yaml(feeds_path, 5 * 1024 * 1024, "feeds")
         # Reset derived proxy configuration on reload
         self.PROXY_URL = None
         if not config_data:
             self.FEED_SOURCES = {}
+            self.FEED_LABELS = {}
             return
 
-        proxy_section = config_data.get('proxy') if isinstance(config_data, dict) else None
+        proxy_section = config_data.get("proxy") if isinstance(config_data, dict) else None
         if isinstance(proxy_section, dict):
-            proxy_url_value = proxy_section.get('url')
+            proxy_url_value = proxy_section.get("url")
             if isinstance(proxy_url_value, str):
                 normalized_proxy = proxy_url_value.strip()
                 if normalized_proxy:
@@ -487,22 +516,34 @@ class Config:
         elif proxy_section not in (None, False):
             logger.warning(f"Proxy configuration in {feeds_path} must be a mapping with a url field")
 
-        feeds_section = config_data.get('feeds') if isinstance(config_data, dict) else None
-        thresholds_section = config_data.get('thresholds') if isinstance(config_data, dict) else {}
+        feeds_section = config_data.get("feeds") if isinstance(config_data, dict) else None
+        thresholds_section = config_data.get("thresholds") if isinstance(config_data, dict) else {}
         if not isinstance(feeds_section, dict):
             logger.warning(f"No valid feeds found in {feeds_path}")
             self.FEED_SOURCES = {}
+            self.FEED_LABELS = {}
             return
 
         new_sources: Dict[str, str] = {}
+        new_labels: Dict[str, str] = {}
         for feed_slug, feed_cfg in feeds_section.items():
-            if isinstance(feed_cfg, dict) and 'url' in feed_cfg:
-                new_sources[feed_slug] = feed_cfg['url']
+            if isinstance(feed_cfg, dict) and "url" in feed_cfg:
+                new_sources[feed_slug] = feed_cfg["url"]
                 logger.debug(f"Loaded feed {feed_slug}: {feed_cfg['url']}")
+                label_val = None
+                try:
+                    raw_label = feed_cfg.get("label") or feed_cfg.get("title")
+                    if isinstance(raw_label, str):
+                        label_val = raw_label.strip() or None
+                except Exception:
+                    label_val = None
+                if label_val:
+                    new_labels[feed_slug] = label_val
             else:
                 logger.warning(f"Skipping invalid feed configuration for '{feed_slug}': {feed_cfg}")
 
         self.FEED_SOURCES = new_sources
+        self.FEED_LABELS = new_labels
         logger.info(f"Successfully loaded {len(self.FEED_SOURCES)} feeds from {feeds_path}")
 
         # Load thresholds (time window & retention) with safe defaults
@@ -511,9 +552,9 @@ class Config:
             rd_raw = None
             initial_bootstrap_raw = None
             if isinstance(thresholds_section, dict):
-                tw_raw = thresholds_section.get('time_window_hours')
-                rd_raw = thresholds_section.get('retention_days')
-                initial_bootstrap_raw = thresholds_section.get('initial_fetch_items')
+                tw_raw = thresholds_section.get("time_window_hours")
+                rd_raw = thresholds_section.get("retention_days")
+                initial_bootstrap_raw = thresholds_section.get("initial_fetch_items")
             # Parse with fallback defaults
             self.TIME_WINDOW_HOURS = 48
             if tw_raw is not None:
@@ -559,16 +600,24 @@ class Config:
             )
         except Exception as e:
             # Never fail due to thresholds parsing
-            self.TIME_WINDOW_HOURS = getattr(self, 'TIME_WINDOW_HOURS', 48)
-            self.RETENTION_DAYS = getattr(self, 'RETENTION_DAYS', 7)
-            self.INITIAL_FETCH_ITEM_LIMIT = getattr(self, 'INITIAL_FETCH_ITEM_LIMIT', 10)
-            logger.warning(f"Failed to parse thresholds from feeds.yaml; using defaults (48h window / 7d retention): {e}")
-    
+            self.TIME_WINDOW_HOURS = getattr(self, "TIME_WINDOW_HOURS", 48)
+            self.RETENTION_DAYS = getattr(self, "RETENTION_DAYS", 7)
+            self.INITIAL_FETCH_ITEM_LIMIT = getattr(self, "INITIAL_FETCH_ITEM_LIMIT", 10)
+
+            # Load recurring coverage settings
+            self.RECURRING_LOOKBACK_DAYS = getattr(self, "RECURRING_LOOKBACK_DAYS", 7)
+            self.RECURRING_CONFIDENCE_THRESHOLD = getattr(self, "RECURRING_CONFIDENCE_THRESHOLD", 0.6)
+            self.RECURRING_HAMMING_THRESHOLD = getattr(self, "RECURRING_HAMMING_THRESHOLD", 16)
+
+            logger.warning(
+                f"Failed to parse thresholds from feeds.yaml; using defaults (48h window / 7d retention): {e}"
+            )
+
     def reload_feed_sources(self):
         """Reload feed sources from configuration file."""
         logger.info("Reloading feed sources configuration")
         self._load_feed_sources()
-    
+
     def get_config_summary(self) -> Dict[str, Any]:
         """Get a summary of current configuration for logging/debugging."""
         return {
@@ -577,6 +626,8 @@ class Config:
             "max_retries": self.MAX_RETRIES,
             "http_timeout": self.HTTP_TIMEOUT,
             "reader_mode_requests_per_minute": self.READER_MODE_REQUESTS_PER_MINUTE,
+            "simhash_hamming_threshold": self.SIMHASH_HAMMING_THRESHOLD,
+            "recurring_hamming_threshold": getattr(self, "RECURRING_HAMMING_THRESHOLD", 16),
             "save_batch_size": self.SAVE_BATCH_SIZE,
             "reader_mode_concurrency": self.READER_MODE_CONCURRENCY,
             "feed_count": len(self.FEED_SOURCES),
@@ -588,6 +639,7 @@ class Config:
             # summarizer_max_tokens removed
             # "summarizer_temperature" removed (using model defaults)
         }
+
 
 # Global configuration instance
 config = Config()

@@ -1,8 +1,8 @@
 """RSS feed publishing pipeline helpers."""
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from config import config, get_logger
+from config import get_logger
 from workers.publisher.merge import summary_id_list
 from workers.publisher.repository import (
     cache_bulletin_introduction,
@@ -25,6 +25,7 @@ async def publish_group_rss(
     prompts: Dict[str, Any],
     db,
     enable_intro: bool,
+    llm_enabled: bool = False,
     get_published_summaries_by_date,
     ai_chat_completion_fn,
     generate_markdown_bulletin,
@@ -94,7 +95,7 @@ async def publish_group_rss(
                 logger.debug("No cached bulletin data for '%s' %s: %s", group_name, session_key, exc)
 
         missing_introductions = set(filtered_bulletins.keys()) - set(bulletin_introductions.keys())
-        if enable_intro and missing_introductions and config.AZURE_ENDPOINT and config.OPENAI_API_KEY:
+        if enable_intro and missing_introductions and llm_enabled:
             for session_key in missing_introductions:
                 summaries = filtered_bulletins[session_key]
                 try:

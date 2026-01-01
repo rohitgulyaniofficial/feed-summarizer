@@ -1,7 +1,6 @@
 import pytest
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from config import config
-from models import DatabaseQueue
 from workers.summarizer import NewsProcessor
 from aiohttp import ClientSession
 

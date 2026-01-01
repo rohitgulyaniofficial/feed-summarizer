@@ -344,14 +344,14 @@ class FeedProcessingOrchestrator:
     
     def print_status(self, status: dict):
         """Print formatted status information."""
-        print(f"\n📊 Feed Processing System Status")
+        print("\n📊 Feed Processing System Status")
         print(f"⏰ {status['timestamp']}")
         print(f"🏥 Overall: {status['overall_status'].upper()}")
         
         # Database status
         db = status['checks']['database']
         if db['status'] == 'ok':
-            print(f"\n💾 Database:")
+            print("\n💾 Database:")
             print(f"   📰 Items: {db['total_items']}")
             print(f"   📝 Summaries: {db['total_summaries']} ({db['summarization_rate']})")
             print(f"   ⏳ Unpublished: {db['unpublished_summaries']}")
@@ -361,7 +361,7 @@ class FeedProcessingOrchestrator:
         
         # Output status
         output = status['checks']['output']
-        print(f"\n📁 Output:")
+        print("\n📁 Output:")
         print(f"   📄 HTML Bulletins: {output['html_bulletins']}")
         print(f"   📡 RSS Feeds: {output['rss_feeds']}")
 

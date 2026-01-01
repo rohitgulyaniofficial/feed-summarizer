@@ -1,8 +1,7 @@
 """Backoff and error-handling helpers for feed fetching."""
 from time import time
-from typing import Optional
 
-from config import config, get_logger
+from config import get_logger
 from models import DatabaseQueue
 from workers.fetcher.constants import HOUR_IN_SECONDS, MAX_BACKOFF_HOURS
 

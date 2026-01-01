@@ -15,6 +15,11 @@ Markdown
 pypdf>=4.2.0
 pytest
 openai>=1.48.0
+setuptools  # Required by stopwordsiso for pkg_resources
+stopwordsiso  # Multilingual stopwords (50+ languages)
+
+# Linting
+ruff
 
 # Telemetry (OpenTelemetry + Azure Monitor exporter)
 opentelemetry-api

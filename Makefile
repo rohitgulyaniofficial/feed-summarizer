@@ -1,9 +1,11 @@
-.PHONY: all pipeline fetcher summarizer publish publish-html publish-rss publish-all upload upload-force clean deploy-production deploy logs deploy-kata-secrets help encrypt-secrets decrypt-secrets test
+.PHONY: all pipeline pipeline-local fetcher summarizer publish publish-html publish-rss publish-all upload upload-force clean deploy-production deploy logs deploy-kata-secrets help encrypt-secrets decrypt-secrets test lint
 export APP_NAME=summarizer
 export PRODUCTION_SERVER=paas
 export PYTHONUNBUFFERED=1
 
-PYTHON=python3
+PYTHON=$(shell which python)
+
+.DEFAULT_GOAL := help
 
 all: pipeline ## Run complete pipeline with upload
 
@@ -11,6 +13,10 @@ all: pipeline ## Run complete pipeline with upload
 pipeline: ## Run end-to-end pipeline (fetch + summarize + publish + upload)
 	@echo "🚀 Running complete Feed Summarizer pipeline..."
 	$(PYTHON) -u main.py run
+
+pipeline-local: ## Run complete pipeline locally (fetch + summarize + publish, no Azure upload)
+	@echo "🏠 Running Feed Summarizer pipeline locally (no Azure upload)..."
+	$(PYTHON) -u main.py run --no-azure
 
 fetcher: ## Run only the feed fetcher (no summarization/publish)
 	@echo "📡 Running FeedFetcher..."
@@ -22,13 +28,13 @@ summarizer: ## Run only the summarizer (no publish)
 
 publish: publish-all ## Alias for publish-all
 
-publish-html: ## Publish HTML bulletins only (no RSS)
-	@echo "📄 Publishing HTML bulletins only..."
-	$(PYTHON) -u main.py publish --no-azure --no-rss
+publish-html: ## Publish HTML bulletins only (no RSS) - not supported, runs full publisher
+	@echo "📄 Publishing HTML bulletins only (note: current implementation publishes both HTML and RSS)..."
+	$(PYTHON) -u main.py publish --no-azure
 
-publish-rss: ## Publish RSS feeds only (no HTML)
-	@echo "📡 Publishing RSS feeds only..."
-	$(PYTHON) -u main.py publish --no-azure --no-html
+publish-rss: ## Publish RSS feeds only (no HTML) - not supported, runs full publisher
+	@echo "📡 Publishing RSS feeds only (note: current implementation publishes both HTML and RSS)..."
+	$(PYTHON) -u main.py publish --no-azure
 
 publish-all: ## Publish all content (HTML + RSS) for existing DB
 	@echo "📰 Publishing all content (HTML bulletins and RSS feeds)..."
@@ -37,6 +43,10 @@ publish-all: ## Publish all content (HTML + RSS) for existing DB
 test: ## Run pytest-based test suite
 	@echo "🧪 Running pytest test suite..."
 	$(PYTHON) -m pytest
+
+lint: ## Run Ruff linter
+	@echo "🧹 Running Ruff linter..."
+	$(PYTHON) -m ruff check .
 
 upload: ## Upload changed files to Azure Storage
 	@echo "☁️  Uploading to Azure Storage..."
@@ -59,10 +69,10 @@ deploy-production: ## Push master to production remote
 
 deploy: deploy-production ## Redeploy service on production host
 	ssh -t kata@$(PRODUCTION_SERVER) docker service update --force $(APP_NAME)_worker
-	ssh -t kata@$(PRODUCTION_SERVER) docker service logs --tail 0 -f $(APP_NAME)_worker
+	ssh -t kata@$(PRODUCTION_SERVER) docker service logs --tail 20 -f $(APP_NAME)_worker
 
 logs: ## Tail production logs
-	ssh -t kata@$(PRODUCTION_SERVER) docker service logs --tail 0 -f $(APP_NAME)_worker
+	ssh -t kata@$(PRODUCTION_SERVER) docker service logs --tail 20 -f $(APP_NAME)_worker
 	git gc --aggressive --prune=now
 
 deploy-kata-secrets: ## Deploy secrets.yaml to kata@paas for feed_summarizer
@@ -82,6 +92,24 @@ fetch-database: ## Fetch latest feeds.db from server
 	@echo "📥 Fetching latest feeds.db from Azure..."
 	ssh paas 'sudo cp -r /home/kata/data/summarizer/ .'
 	scp 'paas:summarizer/feeds.db*' .
+
+sync-github: ## Rsync non-confidential files to GitHub mirror
+	@echo "📤 Syncing to GitHub mirror..."
+	rsync -av --delete \
+		--exclude='.env' \
+		--exclude='feeds.yaml' \
+		--exclude='kata-compose.yaml' \
+		--exclude='secrets.yaml' \
+		--exclude='secrets.yaml.gpg' \
+		--exclude='feeds.db*' \
+		--exclude='*.db' \
+		--exclude='*.db-*' \
+		--exclude='__pycache__/' \
+		--exclude='.git/' \
+		--exclude='public/' \
+		--exclude='.venv/' \
+		--exclude='*.pyc' \
+		./ ~/Sync/Development/GitHub/feed-summarizer/
 
 help: ## Show this help
 	@grep -hE '^[A-Za-z0-9_ \-]*?:.*##.*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'

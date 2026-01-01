@@ -8,6 +8,7 @@ from config import config, get_logger
 from workers.publisher.merge import collect_summary_links, merge_similar_summaries, summary_id_list
 from workers.publisher.html_renderer import generate_bulletin_html
 from workers.publisher.titles import with_session_intro_and_title
+from workers.publisher.recurring import detect_recurring_coverage
 
 logger = get_logger("publisher.bulletin_processor")
 
@@ -40,6 +41,31 @@ async def process_bulletin_chunk(
         db,
         ai_chat_completion,
     )
+
+    # Detect recurring coverage from past week's bulletins
+    recurring_days_back = int(getattr(config, "RECURRING_COVERAGE_DAYS_BACK", 7) or 7)
+    recurring_ids = await detect_recurring_coverage(
+        summaries,
+        group_name,
+        db,
+        days_back=recurring_days_back,
+    )
+    
+    # Update topics for recurring summaries
+    if recurring_ids:
+        recurring_topic = getattr(config, "RECURRING_COVERAGE_TOPIC", "Recurring Coverage")
+        recurring_id_set = set(recurring_ids)
+        for s in summaries:
+            summary_id = s.get("id")
+            if isinstance(summary_id, (int, str)) and int(summary_id) in recurring_id_set:
+                original_topic = s.get("topic", "General")
+                s["topic"] = recurring_topic
+                logger.debug(
+                    "Summary %s reassigned from '%s' to '%s' (recurring coverage)",
+                    summary_id,
+                    original_topic,
+                    recurring_topic,
+                )
 
     for s in summaries:
         try:
@@ -203,6 +229,7 @@ async def process_bulletin_chunk(
             item_ts = None
 
         entry_links = summary.get("merged_links") or collect_summary_links(summary)
+        feed_slug = summary.get("feed_slug")
         entries_payload.append(
             {
                 "id": summary.get("id"),
@@ -215,7 +242,8 @@ async def process_bulletin_chunk(
                 "published_date": summary.get("published_date") or item_ts,
                 "item_title": summary.get("item_title") or summary.get("title"),
                 "item_url": summary.get("item_url") or summary.get("url"),
-                "feed_slug": summary.get("feed_slug"),
+                "feed_slug": feed_slug,
+                "feed_label": config.FEED_LABELS.get(feed_slug, feed_slug) if feed_slug else None,
             }
         )
 
@@ -330,6 +358,7 @@ async def process_bulletin_chunk(
                 except Exception:
                     item_ts = None
                 chunk_links = summary.get("merged_links") or collect_summary_links(summary)
+                feed_slug = summary.get("feed_slug")
                 chunk_entries.append(
                     {
                         "id": summary.get("id"),
@@ -342,7 +371,8 @@ async def process_bulletin_chunk(
                         "published_date": summary.get("published_date") or item_ts,
                         "item_title": summary.get("item_title") or summary.get("title"),
                         "item_url": summary.get("item_url") or summary.get("url"),
-                        "feed_slug": summary.get("feed_slug"),
+                        "feed_slug": feed_slug,
+                        "feed_label": config.FEED_LABELS.get(feed_slug, feed_slug) if feed_slug else None,
                     }
                 )
 

@@ -1,7 +1,6 @@
 """Feed setup and scheduling helpers."""
 from time import time
 from datetime import datetime
-from typing import Optional
 
 from config import config, get_logger
 from workers.fetcher.feeds import get_feed_config

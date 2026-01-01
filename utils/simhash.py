@@ -7,89 +7,41 @@ from collections import Counter
 from hashlib import blake2b
 import re
 from typing import Optional
+import warnings
+
+# Suppress pkg_resources deprecation warning from stopwordsiso
+warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
+
+from stopwordsiso import stopwords as get_stopwords  # noqa: E402 (filter above must run before import)
+
+
+# Load stopwords based on configuration
+def _load_stopwords_cache() -> set:
+    """Load stopwords based on configured locales."""
+    try:
+        from config import config
+        locales = getattr(config, "STOPWORD_LOCALES", ["en", "pt"])
+    except (ImportError, AttributeError):
+        locales = ["en", "pt"]  # Fallback to English and Portuguese
+    return get_stopwords(locales)
+
+
+# Cache stopwords at module load time
+_STOPWORDS_CACHE = _load_stopwords_cache()
 
 
 def compute_simhash(text: Optional[str], hash_bits: int = 64) -> Optional[int]:
-    """Compute a lightweight SimHash fingerprint for the provided text."""
+    """Compute a lightweight SimHash fingerprint for the provided text.
+    
+    Uses multilingual stopwords (English + Portuguese) to filter common words.
+    """
     if not text:
         return None
     tokens = re.findall(r"\w+", text.lower())
     if not tokens:
         return None
 
-    stopwords = {
-        "the",
-        "and",
-        "or",
-        "but",
-        "a",
-        "an",
-        "of",
-        "to",
-        "in",
-        "on",
-        "for",
-        "with",
-        "by",
-        "from",
-        "at",
-        "as",
-        "is",
-        "are",
-        "was",
-        "were",
-        "be",
-        "been",
-        "it",
-        "its",
-        "that",
-        "this",
-        "these",
-        "those",
-        "their",
-        "they",
-        "he",
-        "she",
-        "we",
-        "you",
-        "i",
-        "his",
-        "her",
-        "our",
-        "us",
-        "will",
-        "would",
-        "can",
-        "could",
-        "may",
-        "might",
-        "should",
-        "about",
-        "after",
-        "before",
-        "over",
-        "under",
-        "into",
-        "out",
-        "up",
-        "down",
-        "new",
-        "news",
-        "report",
-        "reports",
-        "reported",
-        "update",
-        "updates",
-        "today",
-        "yesterday",
-        "tomorrow",
-        "year",
-        "years",
-        "month",
-        "months",
-    }
-
-    filtered_tokens = [t for t in tokens if t not in stopwords and len(t) > 2]
+    filtered_tokens = [t for t in tokens if t not in _STOPWORDS_CACHE and len(t) > 2]
     if not filtered_tokens:
         return None
 

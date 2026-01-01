@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS items (
 --   generated_date Epoch seconds when summarization completed
 --   published_date Epoch seconds when first published (HTML/RSS). NULL until published.
 --   simhash        64-bit fingerprint for similarity grouping / deduplication
---   merge_simhash  64-bit fingerprint for merging (normalized title + summary)
+--   merge_simhash  64-bit fingerprint for merging (summary text only)
 CREATE TABLE IF NOT EXISTS summaries (
     id INTEGER PRIMARY KEY,
     summary_text TEXT,           -- AI summary (may be NULL if generation failed)
@@ -158,6 +158,7 @@ CREATE INDEX IF NOT EXISTS idx_bulletin_entries_pos ON bulletin_entries(bulletin
 -- Feeds table indexes
 CREATE INDEX IF NOT EXISTS idx_feeds_slug ON feeds(slug);
 CREATE INDEX IF NOT EXISTS idx_feeds_last_fetched ON feeds(last_fetched);
+CREATE INDEX IF NOT EXISTS idx_feeds_failed_recent ON feeds(last_fetched DESC) WHERE last_error IS NOT NULL AND error_count > 0;
 
 -- Items table indexes  
 CREATE INDEX IF NOT EXISTS idx_items_feed_id ON items(feed_id);
@@ -166,6 +167,8 @@ CREATE INDEX IF NOT EXISTS idx_items_guid ON items(guid);
 CREATE INDEX IF NOT EXISTS idx_items_date ON items(date);
 CREATE INDEX IF NOT EXISTS idx_items_feed_guid ON items(feed_id, guid);
 CREATE INDEX IF NOT EXISTS idx_items_feed_date ON items(feed_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_items_feed_date_id_cover ON items(feed_id, date DESC, id);
+CREATE INDEX IF NOT EXISTS idx_items_date_id ON items(date DESC, id);
 
 -- Summaries table indexes (for topic-based queries)
 CREATE INDEX IF NOT EXISTS idx_summaries_topic ON summaries(topic);
@@ -176,6 +179,9 @@ CREATE INDEX IF NOT EXISTS idx_summaries_published_not_null ON summaries(publish
 CREATE INDEX IF NOT EXISTS idx_summaries_published_null ON summaries(id) WHERE published_date IS NULL;
 CREATE INDEX IF NOT EXISTS idx_summaries_simhash ON summaries(simhash);
 CREATE INDEX IF NOT EXISTS idx_summaries_merge_simhash ON summaries(merge_simhash);
+CREATE INDEX IF NOT EXISTS idx_summaries_merge_simhash_ready ON summaries(merge_simhash, generated_date, id) WHERE merge_simhash IS NOT NULL AND summary_text IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_summaries_simhash_recent ON summaries(simhash, generated_date DESC) WHERE simhash IS NOT NULL AND generated_date IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_summaries_published_cover ON summaries(published_date, id, merge_simhash) WHERE published_date IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- Full-Text Search (FTS5)

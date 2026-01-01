@@ -8,13 +8,23 @@ from typing import Any, Dict, List
 
 from sqlite3 import Error
 
-from config import get_logger
+from config import config, get_logger
 
 logger = get_logger("models")
 
 
 class StatusOpsMixin:
     conn: Any
+
+    @staticmethod
+    def _calculate_backoff_delay(error_count: int) -> int:
+        """Mirror fetcher backoff (1h * 2^(n-1), capped)."""
+        if error_count <= 0:
+            return 0
+        base_delay = config.FETCH_BACKOFF_BASE_SECONDS
+        delay = base_delay * (2 ** (error_count - 1))
+        max_delay = config.FETCH_BACKOFF_MAX_HOURS * config.FETCH_BACKOFF_BASE_SECONDS
+        return int(min(delay, max_delay))
 
     def _bucket_query(self, sql: str, params: List[Any]) -> Dict[int, int]:
         """Run a simple bucketed count query and return bucket->count mapping."""
@@ -127,12 +137,53 @@ class StatusOpsMixin:
             ),
         }
 
+        failed_feeds: List[Dict[str, Any]] = []
+        cursor = None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                SELECT slug, url, last_error, error_count, last_fetched
+                FROM feeds
+                WHERE last_error IS NOT NULL
+                  AND error_count > 0
+                  AND last_fetched >= ?
+                ORDER BY last_fetched DESC
+                """,
+                [start_24h],
+            )
+            rows = cursor.fetchall() or []
+            for row in rows:
+                error_count = int(row["error_count"] or 0)
+                last_fetched = int(row["last_fetched"] or 0)
+                backoff_delay = self._calculate_backoff_delay(error_count)
+                failed_feeds.append(
+                    {
+                        "slug": row["slug"],
+                        "url": row["url"],
+                        "error_count": error_count,
+                        "last_error": row["last_error"],
+                        "last_fetched": last_fetched,
+                        "next_attempt": last_fetched + backoff_delay if last_fetched else 0,
+                        "backoff_seconds": backoff_delay,
+                    }
+                )
+        except Error as exc:
+            logger.error("Failed to load failed feeds for status feed: %s", exc)
+        finally:
+            if cursor:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+
         return {
             "now": now,
             "counts": {"24h": counts_24h, "7d": counts_7d},
             "per_bulletin": bulletin_stats,
             "hourly": hourly,
             "daily": daily,
+            "failed_feeds": failed_feeds,
         }
 
 

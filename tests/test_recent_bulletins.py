@@ -1,7 +1,6 @@
 from pathlib import Path
 from workers.publisher import RSSPublisher
 from config import config
-import asyncio
 
 
 def test_build_recent_bulletins(tmp_path: Path, monkeypatch):

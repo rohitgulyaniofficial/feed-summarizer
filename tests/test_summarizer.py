@@ -1,5 +1,4 @@
 import pytest
-import asyncio
 from workers.summarizer import NewsProcessor
 
 @pytest.fixture

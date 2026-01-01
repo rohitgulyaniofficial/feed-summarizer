@@ -189,10 +189,12 @@ async def write_bulletins_index(
 
     template = env.get_template("bulletins_index.html")
     current_time = datetime.now(timezone.utc)
+    # Normalize base_url to not end with slash for consistent URL construction
+    normalized_base_url = base_url.rstrip('/') if base_url else ''
     html_content = template.render(
         bulletins_info=bulletins_info,
         current_time=current_time,
-        base_url=base_url,
+        base_url=normalized_base_url,
     )
 
     with open(bulletins_index_path, "w", encoding="utf-8") as f:

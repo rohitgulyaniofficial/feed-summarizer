@@ -11,7 +11,7 @@ This project attempts to merge near-duplicate summaries when generating bulletin
 ## Primary signal: SimHash
 
 - Each summary can carry a dedicated merge fingerprint in SQLite as `summaries.merge_simhash`.
-- The merge fingerprint is computed over a stable input: `title + "\n" + summary_text`.
+- The merge fingerprint is computed over the **summary text only** (titles are ignored as they vary by source and add noise).
 - Two summaries are candidates when their fingerprints are within `SIMHASH_HAMMING_THRESHOLD` bits.
 
 Operational knobs:
@@ -44,10 +44,18 @@ If enabled, merges require cosine similarity above the configured minimum in add
 
 ## Diagnostics
 
-- `tools/merge_report.py` prints both SimHash and BM25 decisions (when enabled) for a keyword across recent bulletins.
-  - Example: `python3 tools/merge_report.py --hours 96 --threshold 24 --query Cloudflare`
+- `tools/report_merge.py` prints both SimHash and BM25 decisions (when enabled) for a keyword across recent bulletins.
+  - Example: `python -m tools.report_merge --db feeds.db --days 4 --query Cloudflare`
+- `tools/report_threshold.py` analyzes threshold effectiveness with pair-wise examples.
+- `tools/report_recurring.py` shows recurring coverage detection results.
+- `tools/report_sweep.py` runs threshold sweeps to recommend optimal values.
+
+## SimHash backfill (after algorithm changes)
+
+- `tools/backfill_simhash.py` recomputes `merge_simhash` for all summaries.
+  - Example: `python -m tools.backfill_simhash --db feeds.db`
 
 ## FTS backfill (one-time, for existing DBs)
 
-- `tools/fts_backfill.py` can populate `summary_fts` from historical rows so BM25 works immediately.
-  - Example: `python3 tools/fts_backfill.py --db /data/feeds.db`
+- `tools/backfill_fts.py` can populate `summary_fts` from historical rows so BM25 works immediately.
+  - Example: `python -m tools.backfill_fts --db feeds.db`

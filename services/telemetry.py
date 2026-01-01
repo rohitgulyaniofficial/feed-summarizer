@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import os
 import atexit
+import inspect
 import logging
 import threading
 from typing import Optional
-import asyncio
 
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
@@ -292,7 +292,7 @@ def trace_span(
             # Uncommon case: async iterator; skip for now
             return func
 
-        if asyncio.iscoroutinefunction(func):
+        if inspect.iscoroutinefunction(func):
 
             async def _aw(*args, **kwargs):
                 with tracer.start_as_current_span(name) as span:

@@ -2,6 +2,7 @@ import os
 import py_compile
 import subprocess
 import sys
+from multiprocessing import Pool
 from pathlib import Path
 
 
@@ -39,15 +40,8 @@ def test_all_python_files_compile() -> None:
         py_compile.compile(str(p), doraise=True)
 
 
-def test_all_python_files_import_without_name_errors() -> None:
-    """Import every module file in a subprocess.
-
-    This catches import-time failures (e.g., missing typing imports used
-    in annotations) without polluting the test runner process.
-
-    Note: we deliberately execute by file path (not package name) to cover
-    standalone scripts as well.
-    """
+def _import_file_subprocess(file_path: Path) -> tuple[Path, bool, str]:
+    """Import a single file in a subprocess. Returns (path, success, error_msg)."""
     code = (
         "import importlib.util, sys\n"
         "path = sys.argv[1]\n"
@@ -57,16 +51,11 @@ def test_all_python_files_import_without_name_errors() -> None:
     )
 
     base_env = os.environ.copy()
-    # Keep imports deterministic and avoid noisy warnings breaking CI output.
     base_env.setdefault("PYTHONWARNINGS", "ignore")
 
-    for p in _iter_python_files():
-        # Tests are already imported by pytest; skip to avoid double-loading fixtures.
-        if p.parts[-2] == "tests":
-            continue
-
+    try:
         subprocess.run(
-            [sys.executable, "-c", code, str(p)],
+            [sys.executable, "-c", code, str(file_path)],
             check=True,
             timeout=30,
             env=base_env,
@@ -74,3 +63,38 @@ def test_all_python_files_import_without_name_errors() -> None:
             capture_output=True,
             text=True,
         )
+        # Return only success status to avoid unused variable
+        return (file_path, True, "")
+    except subprocess.CalledProcessError as e:
+        return (file_path, False, f"Exit code {e.returncode}: {e.stderr}")
+    except subprocess.TimeoutExpired:
+        return (file_path, False, "Timeout after 30 seconds")
+    except Exception as e:
+        return (file_path, False, str(e))
+
+
+def test_all_python_files_import_without_name_errors() -> None:
+    """Import every module file in a subprocess using parallel workers.
+
+    This catches import-time failures (e.g., missing typing imports used
+    in annotations) without polluting the test runner process.
+
+    Note: we deliberately execute by file path (not package name) to cover
+    standalone scripts as well.
+    """
+    files_to_test = []
+    for p in _iter_python_files():
+        # Tests are already imported by pytest; skip to avoid double-loading fixtures.
+        if len(p.parts) >= 2 and p.parts[-2] == "tests":
+            continue
+        files_to_test.append(p)
+
+    # Use multiprocessing pool for parallel imports
+    with Pool(processes=os.cpu_count()) as pool:
+        results = pool.map(_import_file_subprocess, files_to_test)
+
+    # Check for failures
+    failures = [(path, error) for path, success, error in results if not success]
+    if failures:
+        error_msg = "\n".join(f"{path}: {error}" for path, error in failures)
+        raise AssertionError(f"Failed to import {len(failures)} file(s):\n{error_msg}")

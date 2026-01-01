@@ -110,8 +110,12 @@ async def with_session_intro_and_title(
 ) -> Tuple[Optional[str], Optional[str]]:
     """Wrapper that manages a ClientSession for intro/title generation."""
     async with ClientSession() as session:
-        bound_intro = lambda mb: generate_ai_introduction(mb, session)
-        bound_title = lambda mb: generate_ai_title(mb, session)
+        def bound_intro(mb):
+            return generate_ai_introduction(mb, session)
+        
+        def bound_title(mb):
+            return generate_ai_title(mb, session)
+        
         return await generate_intro_and_title(
             markdown_bulletin=markdown_bulletin,
             summaries=summaries,

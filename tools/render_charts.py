@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Render current status feed charts to PNG files for local iteration."""
+"""Render current status feed charts to SVG files for local iteration."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import sys
 from pathlib import Path
 from time import time
@@ -28,18 +27,20 @@ async def _fetch_metrics(db: DatabaseQueue) -> Dict[str, Any]:
 
 
 def _write_charts(charts: Dict[str, str], output_dir: Path) -> int:
-    """Decode base64 charts and write them as PNG files."""
+    """Persist inline chart payloads to disk for preview."""
     output_dir.mkdir(parents=True, exist_ok=True)
     written = 0
     for name, payload in charts.items():
         if not payload:
             continue
         try:
-            png_bytes = base64.b64decode(payload)
-            target = output_dir / f"status_{name}.png"
-            target.write_bytes(png_bytes)
-            written += 1
-            logger.info("Wrote %s", target)
+            if payload.lstrip().startswith("<svg"):
+                target = output_dir / f"status_{name}.svg"
+                target.write_text(payload, encoding="utf-8")
+                written += 1
+                logger.info("Wrote %s", target)
+            else:
+                logger.warning("Payload for %s is not SVG; skipping", name)
         except Exception as exc:  # pragma: no cover - debug helper
             logger.error("Failed to write chart %s: %s", name, exc)
     return written
@@ -51,7 +52,7 @@ async def main(argv: list[str] | None = None) -> int:
         "--output-dir",
         type=Path,
         default=Path(config.PUBLIC_DIR) / "feeds" / "status_charts",
-        help="Directory to write PNG charts (default: PUBLIC_DIR/feeds/status_charts)",
+        help="Directory to write SVG charts (default: PUBLIC_DIR/feeds/status_charts)",
     )
     parser.add_argument(
         "--db-path",

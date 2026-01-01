@@ -1,5 +1,3 @@
-import asyncio
-from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest

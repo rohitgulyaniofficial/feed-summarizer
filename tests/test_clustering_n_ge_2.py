@@ -2,7 +2,8 @@ import pytest
 
 
 def test_cluster_candidates_returns_empty_for_single_item():
-    from tools.merge_report import _cluster_candidates, _should_merge_pair
+    from tools.report_merge import _cluster_candidates
+    from utils.merge_policy import should_merge_pair_rows
 
     items = [
         {
@@ -13,14 +14,15 @@ def test_cluster_candidates_returns_empty_for_single_item():
         }
     ]
 
-    clusters = _cluster_candidates(items, threshold=24, linkage="complete", eligible=_should_merge_pair)
+    clusters = _cluster_candidates(items, threshold=24, linkage="complete", eligible=should_merge_pair_rows)
     assert clusters == []
 
 
 def test_cluster_candidates_only_returns_clusters_with_n_ge_2():
-    from tools.merge_report import _cluster_candidates, _should_merge_pair
+    from tools.report_merge import _cluster_candidates
+    from utils.merge_policy import should_merge_pair_rows
 
-    # Two items, but not eligible (no title overlap and no strong summary overlap)
+    # Two items, but not eligible (no summary overlap ≥4 tokens)
     items = [
         {
             "id": 1,
@@ -36,17 +38,18 @@ def test_cluster_candidates_only_returns_clusters_with_n_ge_2():
         },
     ]
 
-    clusters_complete = _cluster_candidates(items, threshold=24, linkage="complete", eligible=_should_merge_pair)
-    clusters_single = _cluster_candidates(items, threshold=24, linkage="single", eligible=_should_merge_pair)
+    clusters_complete = _cluster_candidates(items, threshold=24, linkage="complete", eligible=should_merge_pair_rows)
+    clusters_single = _cluster_candidates(items, threshold=24, linkage="single", eligible=should_merge_pair_rows)
     assert clusters_complete == []
     assert clusters_single == []
 
 
 @pytest.mark.parametrize("linkage", ["single", "complete"])
 def test_cluster_candidates_forms_only_n_ge_2_clusters(linkage):
-    from tools.merge_report import _cluster_candidates, _should_merge_pair
+    from tools.report_merge import _cluster_candidates
+    from utils.merge_policy import should_merge_pair_rows
 
-    # Strong title overlap -> eligible.
+    # Strong summary overlap (≥4 tokens) -> eligible.
     items = [
         {
             "id": 1,
@@ -62,10 +65,10 @@ def test_cluster_candidates_forms_only_n_ge_2_clusters(linkage):
         },
     ]
 
-    clusters = _cluster_candidates(items, threshold=0, linkage=linkage, eligible=_should_merge_pair)
+    clusters = _cluster_candidates(items, threshold=0, linkage=linkage, eligible=should_merge_pair_rows)
     assert clusters == []
 
-    clusters = _cluster_candidates(items, threshold=64, linkage=linkage, eligible=_should_merge_pair)
+    clusters = _cluster_candidates(items, threshold=64, linkage=linkage, eligible=should_merge_pair_rows)
     assert len(clusters) == 1
     assert len(clusters[0]) >= 2
     assert {c["id"] for c in clusters[0]} == {1, 2}

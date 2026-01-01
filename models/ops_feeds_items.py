@@ -3,15 +3,12 @@
 
 from __future__ import annotations
 
-import json
-from os import path
 from time import time
 from typing import Any, Dict, List, Optional, Set
 
 from sqlite3 import Error, Row
 
 from config import get_logger
-from utils import decode_int64
 
 logger = get_logger("models")
 
@@ -319,22 +316,49 @@ class FeedsItemsOpsMixin:
             cursor = self.conn.cursor()
             cursor.row_factory = Row
 
-            placeholders = ",".join(["?" for _ in slugs])
-            params: List[Any] = list(slugs)
-            age_clause = ""
+            slug_placeholders = ",".join(["?" for _ in slugs])
+            cursor.execute(
+                f"SELECT id FROM feeds WHERE slug IN ({slug_placeholders})",
+                slugs,
+            )
+            feed_ids = [row["id"] for row in cursor.fetchall() if row and row["id"] is not None]
+            if not feed_ids:
+                logger.info("No feeds found for slugs: %s", slugs)
+                return []
+
+            feed_placeholders = ",".join(["?" for _ in feed_ids])
+            params: List[Any] = list(feed_ids)
+            age_filter = ""
             if cutoff_age_hours is not None and cutoff_age_hours > 0:
                 try:
                     cutoff_ts = int(time()) - int(cutoff_age_hours * 3600)
-                    age_clause = " AND i.date >= ?"
+                    age_filter = "AND i.date >= ?"
                     params.append(cutoff_ts)
                 except Exception:
-                    age_clause = ""
+                    age_filter = ""
 
             limit_items = getattr(self, "SUMMARY_WINDOW_ITEMS_OVERRIDE", 50)
             if not isinstance(limit_items, int) or limit_items <= 0:
                 limit_items = 50
 
-            query = f"""
+            id_query = f"""
+                SELECT i.id
+                FROM items i
+                WHERE i.feed_id IN ({feed_placeholders})
+                  AND NOT EXISTS (SELECT 1 FROM summaries s WHERE s.id = i.id)
+                  {age_filter}
+                ORDER BY i.date DESC
+                LIMIT ?
+            """
+            cursor.execute(id_query, params + [limit_items])
+            id_rows = cursor.fetchall()
+            candidate_ids = [row["id"] for row in id_rows]
+            if not candidate_ids:
+                logger.debug("No unsummarized items found for feeds: %s", slugs)
+                return []
+
+            id_placeholders = ",".join(["?" for _ in candidate_ids])
+            detail_query = f"""
                 SELECT
                     i.url as url,
                     i.title as title,
@@ -344,14 +368,12 @@ class FeedsItemsOpsMixin:
                     i.date as pubdate,
                     f.url as feed_url,
                     f.title as feed_title
-                FROM feeds f
-                JOIN items i ON i.feed_id = f.id
-                LEFT JOIN summaries s ON i.id = s.id
-                WHERE s.id IS NULL AND f.slug IN ({placeholders}){age_clause}
+                FROM items i
+                JOIN feeds f ON i.feed_id = f.id
+                WHERE i.id IN ({id_placeholders})
                 ORDER BY i.date DESC
-                LIMIT ?
             """
-            cursor.execute(query, params + [limit_items])
+            cursor.execute(detail_query, candidate_ids)
             rows = cursor.fetchall()
 
             items: List[Dict[str, Any]] = []

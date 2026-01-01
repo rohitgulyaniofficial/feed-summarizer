@@ -1,4 +1,3 @@
-import asyncio
 import pytest
 import feedparser
 from workers.fetcher import FeedFetcher

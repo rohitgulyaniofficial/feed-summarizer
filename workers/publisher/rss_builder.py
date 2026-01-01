@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 from feedgen.feed import FeedGenerator
 from markdown import markdown as md
 
-from config import get_logger
+from config import config, get_logger
 from workers.publisher.merge import collect_summary_links
 
 logger = get_logger("publisher.rss_builder")
@@ -233,7 +233,16 @@ def bulletins_html_content(summaries: List[Dict[str, Any]], introduction: Option
         topic = summary.get("topic", "General")
         topics.setdefault(topic, []).append(summary)
 
-    sorted_topics = sorted(topics.keys())
+    # Custom sort to place recurring coverage topic at the end
+    recurring_topic = getattr(config, "RECURRING_COVERAGE_TOPIC", "Recurring Coverage")
+    
+    def topic_sort_key(topic: str) -> tuple:
+        """Sort key to place recurring coverage at the end."""
+        if topic == recurring_topic:
+            return (1, topic)
+        return (0, topic)
+    
+    sorted_topics = sorted(topics.keys(), key=topic_sort_key)
     for topic in topics:
         topics[topic].sort(key=lambda x: x.get("item_date", 0), reverse=True)
 

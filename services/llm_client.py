@@ -9,6 +9,28 @@ from asyncio import sleep
 from config import config, get_logger
 
 
+def _is_token_limit_error(error_obj: Any, exc: Exception) -> bool:
+    """Return True if the exception represents a context length/token limit error."""
+    try:
+        # Prefer explicit provider payload first
+        if isinstance(error_obj, dict):
+            code = error_obj.get("code")
+            inner = (error_obj.get("innererror") or {}).get("code") if isinstance(error_obj.get("innererror"), dict) else None
+            message = (error_obj.get("message") or "").lower()
+            if code == "context_length_exceeded" or inner == "context_length_exceeded":
+                return True
+            if "context length" in message or "tokens" in message:
+                return True
+
+        # Fallback to string inspection of the exception
+        msg = str(exc).lower()
+        if "context_length_exceeded" in msg or "input tokens exceed" in msg or "context length" in msg:
+            return True
+    except Exception:
+        return False
+    return False
+
+
 class ContentFilterError(Exception):
     """Raised when Azure OpenAI content filtering blocks a response.
 
@@ -19,6 +41,24 @@ class ContentFilterError(Exception):
     def __init__(
         self,
         message: str = "Content filtered by Azure OpenAI",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.details = details or {}
+
+
+class TokenLimitError(Exception):
+    """Raised when input tokens exceed the model's context length limit.
+
+    This error should trigger batch splitting rather than retries.
+
+    Attributes:
+        details: Optional provider-specific payload for diagnostics.
+    """
+
+    def __init__(
+        self,
+        message: str = "Token limit exceeded",
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(message)
@@ -149,14 +189,21 @@ async def chat_completion(
                     return None
             return postprocess(raw) if postprocess else raw
         except OpenAIError as e:
-            attempt += 1
             err_body = getattr(e, "body", {}) or {}
             error_obj = err_body.get("error") if isinstance(err_body, dict) else None
             code = (error_obj or {}).get("code") if isinstance(error_obj, dict) else None
             # Treat token parameter errors as generic failures (no token params are sent).
             inner_code = (error_obj or {}).get("innererror", {}).get("code") if isinstance(error_obj, dict) else None
+
+            # Check for non-retryable errors BEFORE incrementing attempt counter
             if code == "content_filter" or inner_code == "ResponsibleAIPolicyViolation":
                 raise ContentFilterError(message=(error_obj or {}).get("message", "Content filtered"), details=error_obj or {})
+            if _is_token_limit_error(error_obj, e):
+                logger.info("Detected token limit error - raising TokenLimitError to trigger batch splitting")
+                raise TokenLimitError(message=(error_obj or {}).get("message", "Token limit exceeded"), details=error_obj or {})
+
+            # Only increment attempt for retryable errors
+            attempt += 1
             if attempt > remaining:
                 logger.error("%s request failed after %d retries: %s", purpose, remaining, e)
                 return None
@@ -164,14 +211,21 @@ async def chat_completion(
             logger.warning("%s transient OpenAI error: %s. Backoff %ss (attempt %d/%d)", purpose, e, delay, attempt, remaining)
             await sleep(delay)
         except Exception as e:
-            attempt += 1
             body = getattr(e, "body", {}) or {}
             error_obj = body.get("error") if isinstance(body, dict) else None
             if isinstance(error_obj, dict):
                 code = error_obj.get("code")
                 inner_code = (error_obj.get("innererror") or {}).get("code") if isinstance(error_obj.get("innererror"), dict) else None
+
+                # Check for non-retryable errors BEFORE incrementing attempt counter
                 if code == "content_filter" or inner_code == "ResponsibleAIPolicyViolation":
                     raise ContentFilterError(message=error_obj.get("message", "Content filtered"), details=error_obj)
+                if _is_token_limit_error(error_obj, e):
+                    logger.info("Detected token limit error in generic handler - raising TokenLimitError to trigger batch splitting")
+                    raise TokenLimitError(message=error_obj.get("message", "Token limit exceeded"), details=error_obj)
+
+            # Only increment attempt for retryable errors
+            attempt += 1
             if attempt > remaining:
                 logger.error("%s unexpected failure after %d retries: %s", purpose, remaining, e)
                 return None
@@ -182,4 +236,4 @@ async def chat_completion(
     return None
 
 
-__all__ = ["chat_completion"]
+__all__ = ["chat_completion", "ContentFilterError", "TokenLimitError"]

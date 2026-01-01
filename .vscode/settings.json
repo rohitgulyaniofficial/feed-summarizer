@@ -1,0 +1,19 @@
+{
+    "python.languageServer": "Pylance",
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportMissingModuleSource": "none",
+        "reportShadowedImports": "none"
+    },
+    "python.analysis.extraPaths": [
+        "",
+        "/var/home/rcarmo/.vscode/extensions/joedevivo.vscode-circuitpython-0.2.0-linux-x64/stubs",
+        "/var/home/rcarmo/.config/Code/User/globalStorage/joedevivo.vscode-circuitpython/bundle/20250810/adafruit-circuitpython-bundle-py-20250810/lib"
+    ],
+    "circuitpython.board.version": null,
+    "makefile.configureOnOpen": false,
+    "python.testing.pytestArgs": [
+        "tests"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true
+}

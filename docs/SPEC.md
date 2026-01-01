@@ -87,7 +87,7 @@ Important scope note:
 #### Primary signal: SimHash (64-bit, Hamming distance)
 
 - Each summary can carry a dedicated merge fingerprint stored in SQLite as `summaries.merge_simhash`.
-- The merge fingerprint is computed over a stable, reproducible input: `title + "\n" + summary_text`.
+- The merge fingerprint is computed over **summary text only** (titles are ignored as they vary by source and add noise to similarity detection).
 - The publisher prefers the stored `merge_simhash` when available and falls back to computing it on the fly (and finally to the legacy `simhash`).
 
 The merge decision uses:
@@ -134,7 +134,7 @@ This keeps the merge step robust to occasional model formatting issues.
 
 #### Comparison: SimHash vs BM25 (FTS5)
 
-Both matchers operate over the same conceptual input (`title + "\n" + summary_text`) but behave differently:
+Both matchers operate over summary text but behave differently:
 
 | Aspect | SimHash | BM25 (SQLite FTS5) |
 | --- | --- | --- |
@@ -148,7 +148,7 @@ Both matchers operate over the same conceptual input (`title + "\n" + summary_te
 
 #### Recommended strategy (as implemented)
 
-- Persist a stable merge fingerprint (`summaries.merge_simhash`) computed from `title + "\n" + summary_text` to make merge behavior reproducible.
+- Persist a stable merge fingerprint (`summaries.merge_simhash`) computed from **summary text only** to make merge behavior reproducible.
 - Use SimHash as the primary merge gate (configurable by `SIMHASH_HAMMING_THRESHOLD`).
 - Apply conservative token-overlap guardrails (titles/summary token overlap and a high-signal token escape hatch) to reduce accidental merges.
 - Use BM25 only as a bounded fallback when enabled, and only within a limited extra-distance window (`BM25_MERGE_MAX_EXTRA_DISTANCE`).
@@ -159,7 +159,7 @@ Note: topic is deliberately *not* used as a hard merge gate, because upstream cl
 
 - The database includes an optional FTS5 virtual table `summary_fts` (created best-effort; some SQLite builds may not ship FTS5).
 - Index maintenance is best-effort on summary writes: `models/` upserts into `summary_fts` in the same persistence path as `summaries`.
-- For existing databases, [tools/fts_backfill.py](tools/fts_backfill.py) can populate `summary_fts` from historical summaries.
+- For existing databases, [tools/backfill_fts.py](tools/backfill_fts.py) can populate `summary_fts` from historical summaries.
 
 ## Scheduled operation
 

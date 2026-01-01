@@ -2,7 +2,7 @@
 """Shared clustering helpers.
 
 This module centralizes the clustering logic used by both runtime merging
-(publisher) and diagnostic reporting (tools/merge_report.py).
+(publisher) and diagnostic reporting (tools/report_merge.py).
 
 It supports:
 - single-linkage clustering via union-find

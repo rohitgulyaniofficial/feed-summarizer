@@ -481,7 +481,7 @@ class FeedScheduler:
         """Print formatted schedule status."""
         status = self.get_schedule_status()
         
-        print(f"\n🕐 Scheduler Status")
+        print("\n🕐 Scheduler Status")
         print(f"⏰ Current time: {status['current_time']}")
         print(f"📅 Schedule entries: {status['schedule_entries_count']}")
         print(f"🌍 Timezone: {status.get('schedule_timezone', 'UTC')}")
@@ -559,7 +559,6 @@ class FeedScheduler:
                         logger.info("⏰ Starting scheduled GLOBAL pipeline run")
                     else:
                         logger.info(f"⏰ Starting scheduled per-feed pipeline run for: {', '.join(slugs)}")
-                    start_time = datetime.now(timezone.utc)
                     success, duration = await self._run_pipeline_with_span(orchestrator, next_time, slugs)
                 
                 if success:

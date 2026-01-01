@@ -3,13 +3,13 @@
 
 This module centralizes the *policy* around when two summaries are eligible to be
 considered similar enough to merge. Both runtime code (publisher) and
-diagnostics tooling (tools/merge_report.py) should use these helpers so behavior
+diagnostics tooling (tools/report_merge.py) should use these helpers so behavior
 stays consistent.
 
 The policy is intentionally conservative and uses:
 - token overlap guardrails (cheap, prevents many accidental SimHash collisions)
 - an adaptive per-pair SimHash threshold (+1 allowance for strong overlap)
-- a canonical merge fingerprint computed from title + "\n" + summary
+- a canonical merge fingerprint computed from summary text only
 
 All functions are dependency-free beyond the project's existing utils.
 """
@@ -19,53 +19,27 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping, Optional, Set, Tuple
 
+from stopwordsiso import stopwords
+
 from utils.simhash import compute_simhash
 
 
-TITLE_STOPWORDS: Set[str] = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "be",
-    "but",
-    "by",
-    "for",
-    "from",
-    "has",
-    "have",
-    "he",
-    "her",
-    "his",
-    "i",
-    "in",
-    "is",
-    "it",
-    "its",
-    "of",
-    "on",
-    "or",
-    "our",
-    "s",
-    "she",
-    "so",
-    "that",
-    "the",
-    "their",
-    "they",
-    "this",
-    "to",
-    "was",
-    "we",
-    "were",
-    "will",
-    "with",
-    "you",
-}
+# Multilingual stopwords loaded from configuration
+# Defaults to English and Portuguese if config not available
+def _load_stopwords() -> Set[str]:
+    """Load stopwords based on configured locales."""
+    try:
+        from config import config
+        locales = getattr(config, "STOPWORD_LOCALES", ["en", "pt"])
+    except (ImportError, AttributeError):
+        locales = ["en", "pt"]  # Fallback to English and Portuguese
+    return stopwords(locales)
+
+
+TITLE_STOPWORDS: Set[str] = _load_stopwords()
 
 SUMMARY_STOPWORDS: Set[str] = TITLE_STOPWORDS | {
+    # English time/news words
     "new",
     "news",
     "report",
@@ -76,6 +50,26 @@ SUMMARY_STOPWORDS: Set[str] = TITLE_STOPWORDS | {
     "today",
     "yesterday",
     "tomorrow",
+    # Portuguese time/news words
+    "agora",
+    "amanhã",
+    "ano",
+    "anos",
+    "atualização",
+    "atualizações",
+    "dia",
+    "dias",
+    "então",
+    "hoje",
+    "novo",
+    "nova",
+    "novos",
+    "novas",
+    "notícia",
+    "notícias",
+    "ontem",
+    "relatório",
+    "relatórios",
 }
 
 
@@ -104,7 +98,16 @@ def is_high_signal_token(token: str) -> bool:
 
 
 def merge_text(title: str, summary_text: str) -> str:
-    return f"{title or ''}\n{summary_text or ''}".strip()
+    """Generate text for SimHash fingerprinting.
+    
+    Uses only summary_text for similarity detection. Titles are ignored because:
+    - Summaries are LLM-generated and normalized
+    - Titles come from original sources and vary wildly in language/style
+    - Including titles adds noise that degrades duplicate detection
+    
+    The title parameter is kept for API compatibility but ignored.
+    """
+    return (summary_text or "").strip()
 
 
 def merge_text_from_row(row: Mapping[str, Any]) -> str:
@@ -156,37 +159,50 @@ def _summary_tokens(row: Mapping[str, Any]) -> Set[str]:
 
 
 def should_merge_pair_rows(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
-    title_shared = _title_tokens(a) & _title_tokens(b)
-    if len(title_shared) >= 2:
-        return True
-
+    """Check if two summaries are eligible for merge consideration.
+    
+    Primary signal: summary token overlap (the actual content we generate).
+    Secondary signal: title overlap (for edge cases with short summaries).
+    """
     summary_shared = _summary_tokens(a) & _summary_tokens(b)
-
-    if len(title_shared) == 0:
-        if len(summary_shared) >= 6:
-            return True
-        if len(summary_shared) >= 4 and any(is_high_signal_token(t) for t in summary_shared):
-            return True
-        return False
-
-    token = next(iter(title_shared))
-    if is_high_signal_token(token):
+    
+    # Primary: summary overlap is the main signal
+    if len(summary_shared) >= 4:
         return True
-
-    return len(summary_shared) >= 2
+    if len(summary_shared) >= 3 and any(is_high_signal_token(t) for t in summary_shared):
+        return True
+    
+    # Secondary: title overlap as fallback for very short summaries
+    title_shared = _title_tokens(a) & _title_tokens(b)
+    if len(title_shared) >= 2 and len(summary_shared) >= 2:
+        return True
+    if len(title_shared) >= 3:
+        return True
+    
+    return False
 
 
 def pair_merge_threshold_rows(a: Mapping[str, Any], b: Mapping[str, Any], base_threshold: int) -> int:
+    """Calculate adaptive threshold for a pair based on content overlap.
+    
+    Higher overlap = more confidence = allows slightly higher threshold.
+    Primary signal: summary token overlap.
+    """
     thr = max(0, int(base_threshold))
     if thr <= 0:
         return 0
 
-    title_shared = _title_tokens(a) & _title_tokens(b)
-    if len(title_shared) >= 3:
-        return thr + 1
-
     summary_shared = _summary_tokens(a) & _summary_tokens(b)
-    if len(summary_shared) >= 5:
+    
+    # Strong summary overlap gets threshold bonus
+    if len(summary_shared) >= 6:
+        return thr + 2
+    if len(summary_shared) >= 4:
+        return thr + 1
+    
+    # Minor bonus for title overlap if summary overlap exists
+    title_shared = _title_tokens(a) & _title_tokens(b)
+    if len(title_shared) >= 3 and len(summary_shared) >= 2:
         return thr + 1
 
     return thr

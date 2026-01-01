@@ -1,4 +1,3 @@
-import pytest
 
 from workers.fetcher.content import normalize_entry_identity
 

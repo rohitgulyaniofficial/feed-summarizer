@@ -312,6 +312,72 @@ class SummariesOpsMixin:
                 except Exception:
                     pass
 
+    def query_all_published_summaries_by_date(
+        self, cutoff_time: int
+    ) -> List[Dict[str, Any]]:
+        """Query ALL published summaries across all feeds after cutoff_time."""
+        cursor = None
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.row_factory = Row
+                query = """
+                    SELECT
+                        s.id,
+                        s.summary_text,
+                        s.topic,
+                        s.simhash,
+                        s.merge_simhash,
+                        s.generated_date,
+                        s.published_date,
+                        i.title as item_title,
+                        i.url as item_url,
+                        i.date as item_date,
+                        f.title as feed_title,
+                        f.slug as feed_slug
+                    FROM summaries s
+                    JOIN items i ON s.id = i.id
+                    JOIN feeds f ON i.feed_id = f.id
+                    WHERE s.summary_text IS NOT NULL
+                    AND s.summary_text != ''
+                    AND s.published_date IS NOT NULL
+                    AND s.published_date >= ?
+                    ORDER BY s.published_date DESC, i.date DESC
+                """
+                cursor.execute(query, (cutoff_time,))
+                rows = cursor.fetchall()
+                summaries: List[Dict[str, Any]] = []
+                for row in rows:
+                    summaries.append(
+                        {
+                            "id": row["id"],
+                            "summary_text": row["summary_text"],
+                            "topic": row["topic"],
+                            "simhash": decode_int64(row["simhash"]),
+                            "merge_simhash": decode_int64(row["merge_simhash"]),
+                            "generated_date": row["generated_date"],
+                            "published_date": row["published_date"],
+                            "item_title": row["item_title"],
+                            "item_url": row["item_url"],
+                            "item_date": row["item_date"],
+                            "feed_title": row["feed_title"],
+                            "feed_slug": row["feed_slug"],
+                        }
+                    )
+                logger.debug(
+                    f"Found {len(summaries)} published summaries across all feeds since {cutoff_time}"
+                )
+                return summaries
+        except Error as e:
+            logger.error(f"Error querying all published summaries: {e}")
+            return []
+        finally:
+            if cursor:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+
     def query_published_summaries_by_date(
         self, feed_slugs: List[str], cutoff_time: int
     ) -> List[Dict[str, Any]]:
