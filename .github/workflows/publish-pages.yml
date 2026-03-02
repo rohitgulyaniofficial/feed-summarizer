@@ -57,8 +57,16 @@ jobs:
       - name: Prepare feeds configuration
         run: |
           if [ -n "${FEEDS_YAML_B64}" ]; then
-            printf '%s' "${FEEDS_YAML_B64}" | base64 -d > feeds.yaml
-            echo "Loaded feeds.yaml from FEEDS_YAML_B64 secret"
+            FEEDS_B64_CLEAN="$(printf '%s' "${FEEDS_YAML_B64}" | tr -d '\r\n\t ')"
+            if printf '%s' "${FEEDS_B64_CLEAN}" | base64 -d > feeds.yaml 2>/dev/null; then
+              echo "Loaded feeds.yaml from FEEDS_YAML_B64 secret (base64)"
+            elif printf '%s' "${FEEDS_YAML_B64}" | grep -q '^---\|^feeds:'; then
+              printf '%s\n' "${FEEDS_YAML_B64}" > feeds.yaml
+              echo "Loaded feeds.yaml from FEEDS_YAML_B64 secret (raw YAML fallback)"
+            else
+              echo "FEEDS_YAML_B64 is set but is not valid base64 or YAML" >&2
+              exit 1
+            fi
           elif [ -f feeds.yaml ]; then
             echo "Using repository feeds.yaml"
           else

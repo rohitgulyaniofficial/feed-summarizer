@@ -45,6 +45,16 @@ Feed config precedence in workflow:
 2. Repository `feeds.yaml` (if committed)
 3. Fallback `feeds.yaml.example`
 
+`FEEDS_YAML_B64` can be either:
+- Base64-encoded YAML (recommended), or
+- Raw YAML text (fallback)
+
+Recommended encoding command:
+
+```bash
+base64 -w0 feeds.yaml
+```
+
 ## Notes on state
 
 - The workflow restores/saves `feeds.db` via `actions/cache`.
