@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LLM_PROVIDER: github_models
-      LLM_MODEL: gpt-4.1-mini
+      LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-4o' }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       FEEDS_YAML_B64: ${{ secrets.FEEDS_YAML_B64 }}
       RSS_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
