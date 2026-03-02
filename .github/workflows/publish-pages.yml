@@ -30,6 +30,7 @@ jobs:
       LLM_PROVIDER: github_models
       LLM_MODEL: gpt-4.1-mini
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      FEEDS_YAML_B64: ${{ secrets.FEEDS_YAML_B64 }}
       RSS_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
     steps:
       - name: Checkout
@@ -51,6 +52,18 @@ jobs:
           if [ -z "${LLM_API_KEY}" ]; then
             echo "Missing required secret: LLM_API_KEY" >&2
             exit 1
+          fi
+
+      - name: Prepare feeds configuration
+        run: |
+          if [ -n "${FEEDS_YAML_B64}" ]; then
+            printf '%s' "${FEEDS_YAML_B64}" | base64 -d > feeds.yaml
+            echo "Loaded feeds.yaml from FEEDS_YAML_B64 secret"
+          elif [ -f feeds.yaml ]; then
+            echo "Using repository feeds.yaml"
+          else
+            cp feeds.yaml.example feeds.yaml
+            echo "feeds.yaml missing; copied feeds.yaml.example"
           fi
 
       - name: Restore feeds.db cache

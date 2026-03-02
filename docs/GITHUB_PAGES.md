@@ -29,6 +29,7 @@ Modes:
 2. Under **Build and deployment**, set source to **GitHub Actions**.
 3. In **Settings → Secrets and variables → Actions**, add:
    - `LLM_API_KEY` = token used for GitHub Models API.
+   - Optional: `FEEDS_YAML_B64` = base64-encoded `feeds.yaml` for private feed config.
 
 The workflow sets:
 - `LLM_PROVIDER=github_models`
@@ -36,6 +37,11 @@ The workflow sets:
 - `RSS_BASE_URL=https://<owner>.github.io/<repo>`
 
 If you want another model, edit `LLM_MODEL` in the workflow.
+
+Feed config precedence in workflow:
+1. `FEEDS_YAML_B64` secret (decoded into `feeds.yaml`)
+2. Repository `feeds.yaml` (if committed)
+3. Fallback `feeds.yaml.example`
 
 ## Notes on state
 
