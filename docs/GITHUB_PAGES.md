@@ -29,6 +29,7 @@ Modes:
 2. Under **Build and deployment**, set source to **GitHub Actions**.
 3. In **Settings → Secrets and variables → Actions**, add:
    - `LLM_API_KEY` = token used for GitHub Models API.
+   - Optional: `FEEDS_YAML` = raw `feeds.yaml` content.
    - Optional: `FEEDS_YAML_B64` = base64-encoded `feeds.yaml` for private feed config.
 4. Optional repository variable:
    - `LLM_MODEL` (defaults to `gpt-4o` when unset)
@@ -41,9 +42,10 @@ The workflow sets:
 To change models without editing workflow YAML, set the `LLM_MODEL` repository variable.
 
 Feed config precedence in workflow:
-1. `FEEDS_YAML_B64` secret (decoded into `feeds.yaml`)
-2. Repository `feeds.yaml` (if committed)
-3. Fallback `feeds.yaml.example`
+1. `FEEDS_YAML` secret (raw YAML)
+2. `FEEDS_YAML_B64` secret (decoded into `feeds.yaml`)
+3. Repository `feeds.yaml` (if committed)
+4. Fallback `feeds.yaml.example`
 
 `FEEDS_YAML_B64` can be either:
 - Base64-encoded YAML (recommended), or

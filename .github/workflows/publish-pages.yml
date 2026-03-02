@@ -30,6 +30,7 @@ jobs:
       LLM_PROVIDER: github_models
       LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-4o' }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      FEEDS_YAML: ${{ secrets.FEEDS_YAML }}
       FEEDS_YAML_B64: ${{ secrets.FEEDS_YAML_B64 }}
       RSS_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
     steps:
@@ -56,7 +57,10 @@ jobs:
 
       - name: Prepare feeds configuration
         run: |
-          if [ -n "${FEEDS_YAML_B64}" ]; then
+          if [ -n "${FEEDS_YAML}" ]; then
+            printf '%s\n' "${FEEDS_YAML}" > feeds.yaml
+            echo "Loaded feeds.yaml from FEEDS_YAML secret (raw YAML)"
+          elif [ -n "${FEEDS_YAML_B64}" ]; then
             FEEDS_B64_CLEAN="$(printf '%s' "${FEEDS_YAML_B64}" | tr -d '\r\n\t ')"
             if printf '%s' "${FEEDS_B64_CLEAN}" | base64 -d > feeds.yaml 2>/dev/null; then
               echo "Loaded feeds.yaml from FEEDS_YAML_B64 secret (base64)"
