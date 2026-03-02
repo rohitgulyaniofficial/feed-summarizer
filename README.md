@@ -2,7 +2,7 @@
 
 Funny story: This was mostly a vibe-coded project that got out of hand. It actually started as a Node-RED flow for personal use, then morphed into a Python script, and I thought it would both help me save time reading news in the mornings and make for a great demo of spec-driven development.
 
-As a direct outcome of my swearing at various LLMs, it became this, which is, in a mouthful, an `asyncio`-based background service that fetches multiple RSS/Atom (and optional Mastodon) sources, stores raw items in SQLite, generates AI summaries (Azure OpenAI), groups them into bulletins, and publishes both HTML and RSS outputs (optionally uploading to Azure Blob Static Website hosting).
+As a direct outcome of my swearing at various LLMs, it became this, which is, in a mouthful, an `asyncio`-based background service that fetches multiple RSS/Atom (and optional Mastodon) sources, stores raw items in SQLite, generates AI summaries (Azure OpenAI or GitHub Models), groups them into bulletins, and publishes both HTML and RSS outputs (optionally uploading to Azure Blob Static Website hosting).
 
 And the end-user experience, for me (using [Reeder Classic](https://reederapp.com/classic)), looks like this:
 
@@ -22,20 +22,32 @@ It is also deployable as a Docker Swarm service using [`kata`](https://github.co
 ## Quickstart (5 commands)
 
 ```bash
-python -m venv .venv              # 1. Create virtualenv
-source .venv/bin/activate         # 2. Activate it
-pip install -r requirements.txt   # 3. Install dependencies
-cp feeds.yaml.example feeds.yaml  # 4. Seed a starter config (edit it)
-python main.py run                # 5. One full pipeline run (fetch→summarize→publish→upload*)
+uv sync                           # 1. Create/sync project environment
+cp feeds.yaml.example feeds.yaml  # 2. Seed a starter config (edit it)
+uv run python main.py run         # 3. Full pipeline run (fetch→summarize→publish→upload*)
+uv run pytest                     # 4. Run tests
+uv run ruff check .               # 5. Lint
 ```
 
 (\*) Azure upload happens only if storage env vars are set; otherwise it is skipped automatically.
+
+Without Azure upload, generated output is still fully consumable from `public/`:
+
+- `public/index.html` (landing page)
+- `public/bulletins/*.html` (latest bulletin per group)
+- `public/feeds/*.xml` (summary RSS feeds)
+
+You can serve this directory with any static server, for example:
+
+```bash
+python3 -m http.server 8000 -d public
+```
 
 ## Features
 
 - Concurrent conditional feed fetching (ETag / Last-Modified; respectful backoff & error tracking)
 - Optional reader mode & GitHub README enrichment for richer summarization context
-- AI summarization with per‑group introductions (opt‑in) via Azure OpenAI
+- AI summarization with per‑group introductions (opt‑in) via Azure OpenAI or GitHub Models
 - Topic/group bulletins rendered as responsive HTML + RSS 2.0 feeds
 - SimHash-powered dedupe (optional BM25/FTS5 fallback) merges near-duplicate summaries and surfaces every source link
 - Optional passthrough (raw) feeds with minimal processing
@@ -52,6 +64,8 @@ Long-form documentation is in the `docs/` folder:
 - [CONFIGURATION](docs/CONFIGURATION.md) (env vars, secrets, scheduling)
 - [RUNNING](docs/RUNNING.md) (CLI modes, flags, scheduling)
 - [PUBLISHING](docs/PUBLISHING.md) (output paths, Azure upload)
+- [GITHUB_PAGES](docs/GITHUB_PAGES.md) (scheduled Actions deployment to Pages)
+- [ENV-MIGRATION](ENV-MIGRATION.md) (Azure to GitHub Models and static hosting env setups)
 - [TELEMETRY](docs/TELEMETRY.md) (OpenTelemetry + Azure exporter)
 - [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) (common symptoms and fixes)
 - [ARCHITECTURE](docs/ARCHITECTURE.md) (module map and pipeline flow)

@@ -214,6 +214,11 @@ class Config:
         self.READER_MODE_CONCURRENCY = self._validate_positive_int("READER_MODE_CONCURRENCY", 3, 1)
 
         # Retention & summarization windows
+        # Baseline defaults (can be overridden by feeds.yaml thresholds)
+        self.TIME_WINDOW_HOURS = self._validate_positive_int("TIME_WINDOW_HOURS", 48, 1)
+        self.RETENTION_DAYS = self._validate_positive_int("RETENTION_DAYS", 7, 1)
+        self.INITIAL_FETCH_ITEM_LIMIT = self._validate_positive_int("INITIAL_FETCH_ITEM_LIMIT", 10, 0)
+
         # Max items physically retained per feed (oldest trimmed by count after new inserts)
         self.MAX_ITEMS_PER_FEED = self._validate_positive_int("MAX_ITEMS_PER_FEED", 400, 50)
         # Number of newest unsummarized items considered per feed when generating summaries
@@ -301,6 +306,14 @@ class Config:
         self.SCHEMA_FILE_SIZE_LIMIT_MB = self._validate_positive_int("SCHEMA_FILE_SIZE_LIMIT_MB", 10, 1)
 
         # OpenAI/Azure AI configuration for summarizer
+        self.LLM_PROVIDER = (environ.get("LLM_PROVIDER", "azure") or "azure").strip().lower()
+        if self.LLM_PROVIDER not in {"azure", "github_models"}:
+            logger.warning(f"Invalid LLM_PROVIDER='{self.LLM_PROVIDER}', defaulting to 'azure'")
+            self.LLM_PROVIDER = "azure"
+        self.LLM_MODEL = environ.get("LLM_MODEL")
+        self.LLM_BASE_URL = environ.get("LLM_BASE_URL")
+        self.LLM_API_KEY = environ.get("LLM_API_KEY")
+
         self.AZURE_ENDPOINT = environ.get("AZURE_ENDPOINT")
         # Normalize endpoint (strip scheme and trailing slashes) to avoid malformed URLs
         if self.AZURE_ENDPOINT:
@@ -636,6 +649,9 @@ class Config:
             "has_azure_endpoint": bool(self.AZURE_ENDPOINT),
             "has_openai_key": bool(self.OPENAI_API_KEY),
             "has_azure_storage": bool(self.AZURE_STORAGE_ACCOUNT and self.AZURE_STORAGE_KEY),
+            "llm_provider": self.LLM_PROVIDER,
+            "has_llm_api_key": bool(self.LLM_API_KEY),
+            "has_llm_model": bool(self.LLM_MODEL),
             # summarizer_max_tokens removed
             # "summarizer_temperature" removed (using model defaults)
         }

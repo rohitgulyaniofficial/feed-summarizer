@@ -21,8 +21,12 @@ import yaml
 
 # Import configuration, models, and shared utilities
 from config import config, get_logger
-from services.llm_client import chat_completion as ai_chat_completion
-from services.llm_client import ContentFilterError, TokenLimitError
+from services.llm_client import (
+    chat_completion as ai_chat_completion,
+    ContentFilterError,
+    TokenLimitError,
+    validate_llm_configuration,
+)
 from services.telemetry import init_telemetry, get_tracer, trace_span
 from models import DatabaseQueue
 from utils import RateLimiter, RetryHelper, compute_simhash
@@ -41,28 +45,27 @@ def _mask_secret(value: Optional[str], show: int = 4) -> str:
         return "*" * len(v)
     return f"{v[:show]}***{v[-show:]}"
 
+
+def _llm_span_attributes(prompt_text: str) -> Dict[str, Any]:
+    provider = str(getattr(config, "LLM_PROVIDER", "azure") or "azure").strip().lower()
+    attrs: Dict[str, Any] = {
+        "prompt.length": len(prompt_text or ""),
+        "llm.provider": provider,
+    }
+    if provider == "azure":
+        if getattr(config, "DEPLOYMENT_NAME", None):
+            attrs["azure.openai.deployment"] = config.DEPLOYMENT_NAME
+        if getattr(config, "OPENAI_API_VERSION", None):
+            attrs["azure.openai.api_version"] = config.OPENAI_API_VERSION
+    elif getattr(config, "LLM_MODEL", None):
+        attrs["llm.model"] = config.LLM_MODEL
+    return attrs
+
 # Validate required configuration
 def validate_configuration():
     """Validate critical configuration values for the summarizer."""
-    errors = []
-    
-    if not config.AZURE_ENDPOINT:
-        errors.append("AZURE_ENDPOINT environment variable not set")
-    elif not config.AZURE_ENDPOINT.strip():
-        errors.append("AZURE_ENDPOINT environment variable is empty")
-        
-    if not config.OPENAI_API_KEY:
-        errors.append("OPENAI_API_KEY environment variable not set")
-    elif not config.OPENAI_API_KEY.strip():
-        errors.append("OPENAI_API_KEY environment variable is empty")
-    elif len(config.OPENAI_API_KEY) < 20:  # Basic sanity check
-        errors.append("OPENAI_API_KEY appears to be invalid (too short)")
-        
-    if not config.DEPLOYMENT_NAME:
-        errors.append("DEPLOYMENT_NAME environment variable not set")
-    elif not config.DEPLOYMENT_NAME.strip():
-        errors.append("DEPLOYMENT_NAME environment variable is empty")
-        
+    errors = validate_llm_configuration()
+
     if not config.DATABASE_PATH:
         errors.append("DATABASE_PATH not configured")
         
@@ -74,21 +77,28 @@ def validate_configuration():
     else:
         # Log a concise, sanitized configuration summary for diagnostics
         try:
-            endpoint_preview = config.AZURE_ENDPOINT or ""
-            # Avoid duplicating scheme in summary; only show host-ish
-            endpoint_preview = endpoint_preview.replace("https://", "").replace("http://", "")
-            logger.info(
-                "Azure OpenAI config: endpoint=%s, deployment=%s, api_version=%s, key=%s",
-                endpoint_preview,
-                config.DEPLOYMENT_NAME,
-                config.OPENAI_API_VERSION,
-                _mask_secret(config.OPENAI_API_KEY)
-            )
+            provider = str(getattr(config, "LLM_PROVIDER", "azure") or "azure").strip().lower()
+            if provider == "github_models":
+                logger.info(
+                    "LLM config: provider=%s, base_url=%s, model=%s, key=%s",
+                    provider,
+                    getattr(config, "LLM_BASE_URL", None) or "https://models.inference.ai.azure.com",
+                    getattr(config, "LLM_MODEL", None),
+                    _mask_secret(getattr(config, "LLM_API_KEY", None)),
+                )
+            else:
+                endpoint_preview = config.AZURE_ENDPOINT or ""
+                endpoint_preview = endpoint_preview.replace("https://", "").replace("http://", "")
+                logger.info(
+                    "LLM config: provider=%s, endpoint=%s, deployment=%s, api_version=%s, key=%s",
+                    provider,
+                    endpoint_preview,
+                    config.DEPLOYMENT_NAME,
+                    config.OPENAI_API_VERSION,
+                    _mask_secret(config.OPENAI_API_KEY),
+                )
         except Exception as e:
-            logger.debug(f"Failed to log Azure config summary: {e}")
-
-# Validate configuration on startup
-validate_configuration()
+            logger.debug(f"Failed to log LLM config summary: {e}")
 
 # Load feed list from configuration
 def get_feed_slugs() -> List[str]:
@@ -377,13 +387,9 @@ class NewsProcessor:
     # Removed legacy _build_api_request_data and _make_api_request after migration to ai_client.chat_completion
 
     @trace_span(
-        "azure_openai.completions",
+        "llm.completions",
         tracer_name="summarizer",
-        attr_from_args=lambda self, prompt_text, session: {
-            "azure.openai.deployment": config.DEPLOYMENT_NAME,
-            "azure.openai.api_version": config.OPENAI_API_VERSION,
-            "prompt.length": len(prompt_text or ""),
-        },
+        attr_from_args=lambda self, prompt_text, session: _llm_span_attributes(prompt_text),
     )
     async def call_azure_openai(self, prompt_text: str, session: ClientSession) -> Optional[str]:
         """Call Azure OpenAI API with prepared prompt using shared helper (falls back to detailed path for content filter)."""
@@ -802,6 +808,7 @@ class NewsProcessor:
         Args:
             only_slugs: If provided, only process these feed slugs.
         """
+        validate_configuration()
         logger.info("Starting scheduled feed processing")
         
         # Use aiohttp session for all API calls
@@ -884,5 +891,3 @@ async def main_async_single_run():
         logger.error(traceback.format_exc())
     finally:
         await processor.close()
-
-

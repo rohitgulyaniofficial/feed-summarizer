@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Async Azure OpenAI helper providing `chat_completion` with retry, content filter handling,
-normalized content extraction and optional post-processing. Returns `None` on exhausted
-retries or non-filter failures."""
+"""Async LLM helper providing `chat_completion` with retries and provider routing.
+
+Supported providers:
+- azure (default, backward-compatible)
+- github_models (OpenAI-compatible endpoint + PAT)
+"""
+
 from __future__ import annotations
-from typing import List, Dict, Any, Optional, Callable
+
 from asyncio import sleep
+from typing import Any, Callable, Dict, List, Optional
 
 from config import config, get_logger
 
@@ -12,17 +17,19 @@ from config import config, get_logger
 def _is_token_limit_error(error_obj: Any, exc: Exception) -> bool:
     """Return True if the exception represents a context length/token limit error."""
     try:
-        # Prefer explicit provider payload first
         if isinstance(error_obj, dict):
             code = error_obj.get("code")
-            inner = (error_obj.get("innererror") or {}).get("code") if isinstance(error_obj.get("innererror"), dict) else None
+            inner = (
+                (error_obj.get("innererror") or {}).get("code")
+                if isinstance(error_obj.get("innererror"), dict)
+                else None
+            )
             message = (error_obj.get("message") or "").lower()
             if code == "context_length_exceeded" or inner == "context_length_exceeded":
                 return True
             if "context length" in message or "tokens" in message:
                 return True
 
-        # Fallback to string inspection of the exception
         msg = str(exc).lower()
         if "context_length_exceeded" in msg or "input tokens exceed" in msg or "context length" in msg:
             return True
@@ -32,91 +39,188 @@ def _is_token_limit_error(error_obj: Any, exc: Exception) -> bool:
 
 
 class ContentFilterError(Exception):
-    """Raised when Azure OpenAI content filtering blocks a response.
+    """Raised when provider content filtering blocks a response."""
 
-    Attributes:
-        details: Optional provider-specific payload for diagnostics.
-    """
-
-    def __init__(
-        self,
-        message: str = "Content filtered by Azure OpenAI",
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def __init__(self, message: str = "Content filtered by LLM provider", details: Optional[Dict[str, Any]] = None) -> None:
         super().__init__(message)
         self.details = details or {}
 
 
 class TokenLimitError(Exception):
-    """Raised when input tokens exceed the model's context length limit.
+    """Raised when input tokens exceed the model context window."""
 
-    This error should trigger batch splitting rather than retries.
-
-    Attributes:
-        details: Optional provider-specific payload for diagnostics.
-    """
-
-    def __init__(
-        self,
-        message: str = "Token limit exceeded",
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def __init__(self, message: str = "Token limit exceeded", details: Optional[Dict[str, Any]] = None) -> None:
         super().__init__(message)
         self.details = details or {}
 
+
 try:  # Guarded import (dependency declared in requirements.txt)
-    from openai import AsyncAzureOpenAI, OpenAIError
+    from openai import AsyncAzureOpenAI, AsyncOpenAI, OpenAIError
 except ImportError:  # pragma: no cover
     AsyncAzureOpenAI = None  # type: ignore
+    AsyncOpenAI = None  # type: ignore
     OpenAIError = Exception  # type: ignore
+
 
 logger = get_logger("llm_client")
 
-_client: Any = None
+_clients: Dict[str, Any] = {}
 
 
-def _get_client() -> Optional[Any]:
-    """Instantiate and cache the Azure OpenAI async client if configuration is present."""
-    global _client
-    if _client is not None:
-        return _client
-    if not AsyncAzureOpenAI:
+def _normalized_provider() -> str:
+    provider = str(getattr(config, "LLM_PROVIDER", "azure") or "azure").strip().lower()
+    if provider not in {"azure", "github_models"}:
+        return "azure"
+    return provider
+
+
+def _get_effective_llm_model(provider: Optional[str] = None) -> Optional[str]:
+    p = provider or _normalized_provider()
+    if p == "azure":
+        return (getattr(config, "DEPLOYMENT_NAME", None) or "").strip() or None
+    return (getattr(config, "LLM_MODEL", None) or "").strip() or None
+
+
+def _get_effective_llm_api_key(provider: Optional[str] = None) -> Optional[str]:
+    p = provider or _normalized_provider()
+    if p == "azure":
+        return (getattr(config, "OPENAI_API_KEY", None) or "").strip() or None
+    generic = (getattr(config, "LLM_API_KEY", None) or "").strip() or None
+    if generic:
+        return generic
+    return None
+
+
+def _get_effective_llm_base_url(provider: Optional[str] = None) -> Optional[str]:
+    p = provider or _normalized_provider()
+    if p != "github_models":
         return None
-    if not (config.OPENAI_API_KEY and config.AZURE_ENDPOINT and config.OPENAI_API_VERSION and config.DEPLOYMENT_NAME):
-        logger.debug("Missing Azure OpenAI config; client will not initialize")
+    custom = (getattr(config, "LLM_BASE_URL", None) or "").strip()
+    if custom:
+        return custom.rstrip("/")
+    return "https://models.inference.ai.azure.com"
+
+
+def validate_llm_configuration(provider: Optional[str] = None) -> List[str]:
+    """Validate active provider config. Returns a list of human-readable errors."""
+    p = provider or _normalized_provider()
+    errors: List[str] = []
+
+    if p == "azure":
+        endpoint = (getattr(config, "AZURE_ENDPOINT", None) or "").strip()
+        key = (getattr(config, "OPENAI_API_KEY", None) or "").strip()
+        deployment = (getattr(config, "DEPLOYMENT_NAME", None) or "").strip()
+        api_version = (getattr(config, "OPENAI_API_VERSION", None) or "").strip()
+
+        if not endpoint:
+            errors.append("AZURE_ENDPOINT environment variable not set")
+        if not key:
+            errors.append("OPENAI_API_KEY environment variable not set")
+        elif len(key) < 20:
+            errors.append("OPENAI_API_KEY appears to be invalid (too short)")
+        if not deployment:
+            errors.append("DEPLOYMENT_NAME environment variable not set")
+        if not api_version:
+            errors.append("OPENAI_API_VERSION environment variable not set")
+        return errors
+
+    if p == "github_models":
+        key = _get_effective_llm_api_key("github_models")
+        model = _get_effective_llm_model("github_models")
+        if not key:
+            errors.append("LLM_API_KEY environment variable not set for github_models provider")
+        elif len(key) < 20:
+            errors.append("LLM_API_KEY appears to be invalid (too short)")
+        if not model:
+            errors.append("LLM_MODEL environment variable not set for github_models provider")
+        return errors
+
+    errors.append(f"Unsupported LLM_PROVIDER '{p}'")
+    return errors
+
+
+def is_llm_enabled(provider: Optional[str] = None) -> bool:
+    return len(validate_llm_configuration(provider)) == 0
+
+
+def _cache_key_for_provider(provider: str) -> str:
+    if provider == "azure":
+        endpoint = str(getattr(config, "AZURE_ENDPOINT", "") or "")
+        version = str(getattr(config, "OPENAI_API_VERSION", "") or "")
+        deployment = str(getattr(config, "DEPLOYMENT_NAME", "") or "")
+        return f"azure::{endpoint}::{version}::{deployment}"
+    base_url = _get_effective_llm_base_url(provider) or ""
+    model = _get_effective_llm_model(provider) or ""
+    return f"github_models::{base_url}::{model}"
+
+
+def _get_client(provider: Optional[str] = None) -> Optional[Any]:
+    """Instantiate and cache provider client when configuration is valid."""
+    p = provider or _normalized_provider()
+    if not is_llm_enabled(p):
+        logger.debug("Missing %s LLM config; client will not initialize", p)
         return None
-    endpoint = (
-        f"https://{config.AZURE_ENDPOINT}" if not str(config.AZURE_ENDPOINT).startswith("http") else config.AZURE_ENDPOINT
-    )
-    _client = AsyncAzureOpenAI(
-        api_key=config.OPENAI_API_KEY,
-        api_version=config.OPENAI_API_VERSION,
-        azure_endpoint=endpoint,
-    )
-    return _client
+
+    cache_key = _cache_key_for_provider(p)
+    if cache_key in _clients:
+        return _clients[cache_key]
+
+    if p == "azure":
+        if not AsyncAzureOpenAI:
+            return None
+        endpoint = str(getattr(config, "AZURE_ENDPOINT", "") or "")
+        endpoint = f"https://{endpoint}" if endpoint and not endpoint.startswith("http") else endpoint
+        _clients[cache_key] = AsyncAzureOpenAI(
+            api_key=_get_effective_llm_api_key("azure"),
+            api_version=getattr(config, "OPENAI_API_VERSION", None),
+            azure_endpoint=endpoint,
+        )
+        return _clients[cache_key]
+
+    if p == "github_models":
+        if not AsyncOpenAI:
+            return None
+        _clients[cache_key] = AsyncOpenAI(
+            api_key=_get_effective_llm_api_key("github_models"),
+            base_url=_get_effective_llm_base_url("github_models"),
+        )
+        return _clients[cache_key]
+
+    return None
+
+
+def _extract_model_name(provider: str) -> Optional[str]:
+    return _get_effective_llm_model(provider)
 
 
 async def chat_completion(
-    messages: List[Dict[str, str]] = None,
+    messages: Optional[List[Dict[str, str]]] = None,
     *,
     purpose: str = "generic",
     retries: Optional[int] = None,
     postprocess: Optional[Callable[[str], str]] = None,
     client_override: Optional[Any] = None,
 ) -> Optional[str]:
-    """Execute an Azure OpenAI chat completion. Raises `ContentFilterError` on policy violations."""
+    """Execute a provider chat completion. Raises `ContentFilterError` on policy violations."""
     if messages is None:
         logger.error("chat_completion called without messages list")
         return None
 
-    client = client_override or _get_client()
+    provider = _normalized_provider()
+    client = client_override or _get_client(provider)
     if client is None:
-        logger.warning("Azure OpenAI client unavailable; skipping %s", purpose)
+        logger.warning("LLM client unavailable for provider=%s; skipping %s", provider, purpose)
         return None
 
     remaining = retries if retries is not None else config.SUMMARIZER_MAX_RETRIES
     attempt = 0
-    model_name = config.DEPLOYMENT_NAME
+    model_name = _extract_model_name(provider)
+    if not model_name:
+        if client_override is not None:
+            model_name = "test-model"
+        else:
+            logger.warning("Model name missing for provider=%s; skipping %s", provider, purpose)
+            return None
 
     while attempt <= remaining:
         params: Dict[str, Any] = {
@@ -129,6 +233,7 @@ async def chat_completion(
             if not choices:
                 logger.error("No choices in %s response: %s", purpose, resp)
                 return None
+
             def _extract_text(choice: Any) -> str:
                 message = getattr(choice, "message", {}) or {}
                 if isinstance(message, dict) and message.get("refusal"):
@@ -144,11 +249,11 @@ async def chat_completion(
                             txt = part.get("text")
                             if isinstance(txt, str) and txt.strip():
                                 texts.append(txt.strip())
-                            else:
-                                if ptype not in ("text", "output_text", None):
-                                    logger.debug("Ignoring non-text part type=%s keys=%s", ptype, list(part.keys()))
+                            elif ptype not in ("text", "output_text", None):
+                                logger.debug("Ignoring non-text part type=%s keys=%s", ptype, list(part.keys()))
                     return "\n".join(texts).strip()
                 return ""
+
             fragments: List[str] = []
             refusal_detected = False
             for ch in choices:
@@ -163,20 +268,27 @@ async def chat_completion(
             if refusal_detected and not fragments:
                 logger.warning("All choices refused for %s; returning None", purpose)
                 return None
+
             raw = "\n".join(fragments).strip()
             if not raw:
-                finish_reasons = {getattr(c, "finish_reason", None) for c in choices if getattr(c, "finish_reason", None)}
+                finish_reasons = {
+                    getattr(c, "finish_reason", None) for c in choices if getattr(c, "finish_reason", None)
+                }
                 if "length" in finish_reasons:
                     try:
                         logger.warning(
-                            "Truncated output with empty content (%s); placeholder will be returned. choices=%s (no explicit token limit)",
+                            "Truncated output with empty content (%s); placeholder will be returned. choices=%s",
                             purpose,
                             [
                                 {
                                     "finish_reason": getattr(c, "finish_reason", None),
                                     "has_message": bool(getattr(c, "message", None)),
-                                    "message_content_type": type(getattr(getattr(c, "message", None), "content", None)).__name__,
-                                    "message_content_repr": repr(getattr(getattr(c, "message", None), "content", None))[:300],
+                                    "message_content_type": type(
+                                        getattr(getattr(c, "message", None), "content", None)
+                                    ).__name__,
+                                    "message_content_repr": repr(
+                                        getattr(getattr(c, "message", None), "content", None)
+                                    )[:300],
                                 }
                                 for c in choices
                             ],
@@ -185,55 +297,80 @@ async def chat_completion(
                         logger.warning("Truncated output with empty content (%s); returning placeholder", purpose)
                     raw = "[Truncated output: no content returned]"
                 else:
-                    logger.error("Empty content in %s response despite choices (finish_reasons=%s)", purpose, finish_reasons)
+                    logger.error(
+                        "Empty content in %s response despite choices (finish_reasons=%s)",
+                        purpose,
+                        finish_reasons,
+                    )
                     return None
             return postprocess(raw) if postprocess else raw
         except OpenAIError as e:
             err_body = getattr(e, "body", {}) or {}
             error_obj = err_body.get("error") if isinstance(err_body, dict) else None
             code = (error_obj or {}).get("code") if isinstance(error_obj, dict) else None
-            # Treat token parameter errors as generic failures (no token params are sent).
             inner_code = (error_obj or {}).get("innererror", {}).get("code") if isinstance(error_obj, dict) else None
 
-            # Check for non-retryable errors BEFORE incrementing attempt counter
             if code == "content_filter" or inner_code == "ResponsibleAIPolicyViolation":
                 raise ContentFilterError(message=(error_obj or {}).get("message", "Content filtered"), details=error_obj or {})
             if _is_token_limit_error(error_obj, e):
                 logger.info("Detected token limit error - raising TokenLimitError to trigger batch splitting")
                 raise TokenLimitError(message=(error_obj or {}).get("message", "Token limit exceeded"), details=error_obj or {})
 
-            # Only increment attempt for retryable errors
             attempt += 1
             if attempt > remaining:
                 logger.error("%s request failed after %d retries: %s", purpose, remaining, e)
                 return None
             delay = config.SUMMARIZER_RETRY_DELAY_BASE * (2 ** (attempt - 1))
-            logger.warning("%s transient OpenAI error: %s. Backoff %ss (attempt %d/%d)", purpose, e, delay, attempt, remaining)
+            logger.warning(
+                "%s transient LLM error (provider=%s): %s. Backoff %ss (attempt %d/%d)",
+                purpose,
+                provider,
+                e,
+                delay,
+                attempt,
+                remaining,
+            )
             await sleep(delay)
         except Exception as e:
             body = getattr(e, "body", {}) or {}
             error_obj = body.get("error") if isinstance(body, dict) else None
             if isinstance(error_obj, dict):
                 code = error_obj.get("code")
-                inner_code = (error_obj.get("innererror") or {}).get("code") if isinstance(error_obj.get("innererror"), dict) else None
+                inner_code = (
+                    (error_obj.get("innererror") or {}).get("code")
+                    if isinstance(error_obj.get("innererror"), dict)
+                    else None
+                )
 
-                # Check for non-retryable errors BEFORE incrementing attempt counter
                 if code == "content_filter" or inner_code == "ResponsibleAIPolicyViolation":
                     raise ContentFilterError(message=error_obj.get("message", "Content filtered"), details=error_obj)
                 if _is_token_limit_error(error_obj, e):
-                    logger.info("Detected token limit error in generic handler - raising TokenLimitError to trigger batch splitting")
+                    logger.info("Detected token limit error in generic handler - raising TokenLimitError")
                     raise TokenLimitError(message=error_obj.get("message", "Token limit exceeded"), details=error_obj)
 
-            # Only increment attempt for retryable errors
             attempt += 1
             if attempt > remaining:
                 logger.error("%s unexpected failure after %d retries: %s", purpose, remaining, e)
                 return None
             delay = config.SUMMARIZER_RETRY_DELAY_BASE * (2 ** (attempt - 1))
-            logger.warning("%s unexpected error: %s. Backoff %ss (attempt %d/%d)", purpose, e, delay, attempt, remaining)
+            logger.warning(
+                "%s unexpected error (provider=%s): %s. Backoff %ss (attempt %d/%d)",
+                purpose,
+                provider,
+                e,
+                delay,
+                attempt,
+                remaining,
+            )
             await sleep(delay)
 
     return None
 
 
-__all__ = ["chat_completion", "ContentFilterError", "TokenLimitError"]
+__all__ = [
+    "chat_completion",
+    "ContentFilterError",
+    "TokenLimitError",
+    "is_llm_enabled",
+    "validate_llm_configuration",
+]

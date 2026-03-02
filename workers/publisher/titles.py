@@ -3,7 +3,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from aiohttp import ClientSession
 
-from config import config, get_logger
+from config import get_logger
+from services.llm_client import is_llm_enabled
 
 logger = get_logger("publisher.titles")
 
@@ -31,7 +32,9 @@ async def generate_intro_and_title(
     introduction: Optional[str] = None
     ai_title: Optional[str] = None
 
-    if enable_intro and config.AZURE_ENDPOINT and config.OPENAI_API_KEY:
+    llm_enabled = is_llm_enabled()
+
+    if enable_intro and llm_enabled:
         try:
             introduction = await generate_ai_introduction(markdown_bulletin)
             if introduction:
@@ -41,7 +44,7 @@ async def generate_intro_and_title(
         except Exception as exc:
             logger.error("Error generating AI introduction: %s", exc)
 
-    if generate_title and config.AZURE_ENDPOINT and config.OPENAI_API_KEY:
+    if generate_title and llm_enabled:
         try:
             ai_title = await generate_ai_title(markdown_bulletin)
             if ai_title:

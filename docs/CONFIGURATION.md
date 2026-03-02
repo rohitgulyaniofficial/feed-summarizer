@@ -19,25 +19,35 @@ Notes:
 - `secrets.yaml` supports either a top-level mapping or nesting under `environment:`.
 - `AZURE_ENDPOINT` is normalized (scheme/trailing slashes removed).
 - `.env` is loaded without overriding existing environment variables.
+- `LLM_PROVIDER` defaults to `azure`; set `github_models` to use GitHub Models.
 
 ## Essential environment variables
 
-| Variable                    | Purpose                                     | Notes                                                                      |
-| --------------------------- | ------------------------------------------- | -------------------------------------------------------------------------- |
-| `AZURE_ENDPOINT`            | Azure OpenAI endpoint host (no scheme)      | Auto-normalized (strip `https://`)                                         |
-| `OPENAI_API_KEY`            | Azure OpenAI API key                        | Required for summaries                                                     |
-| `DEPLOYMENT_NAME`           | Azure OpenAI deployment name                | Required for summaries                                                     |
-| `OPENAI_API_VERSION`        | Azure OpenAI API version                    | Required for summaries                                                     |
-| `RSS_BASE_URL`              | Public base URL for generated links         | Affects GUID/self links                                                    |
-| `DATABASE_PATH`             | SQLite path                                 | Default: `feeds.db`                                                        |
+| Variable                    | Purpose                                     | Notes                                                                       |
+| --------------------------- | ------------------------------------------- | --------------------------------------------------------------------------- |
+| `LLM_PROVIDER`              | LLM provider selector                       | `azure` (default) or `github_models`                                       |
+| `LLM_API_KEY`               | Generic LLM API key                         | Used by `github_models`; keep unset for Azure mode                         |
+| `LLM_MODEL`                 | Generic LLM model id                        | Required by `github_models`                                                 |
+| `LLM_BASE_URL`              | Generic LLM API base URL                    | Optional for `github_models` (default: `https://models.inference.ai.azure.com`) |
+| `AZURE_ENDPOINT`            | Azure OpenAI endpoint host (no scheme)      | Auto-normalized (strip `https://`)                                          |
+| `OPENAI_API_KEY`            | Azure OpenAI API key                        | Required for Azure mode                                                     |
+| `DEPLOYMENT_NAME`           | Azure OpenAI deployment name                | Required for Azure mode                                                     |
+| `OPENAI_API_VERSION`        | Azure OpenAI API version                    | Required for Azure mode                                                     |
+| `RSS_BASE_URL`              | Public base URL for generated links         | Affects GUID/self links                                                     |
+| `DATABASE_PATH`             | SQLite path                                 | Default: `feeds.db`                                                         |
 | `PUBLIC_DIR`                | Output directory root                       | Default: `$DATA_PATH/public` (where `DATA_PATH` defaults to the repo root) |
-| `AZURE_STORAGE_ACCOUNT`     | Blob storage account                        | Optional (enables upload)                                                  |
-| `AZURE_STORAGE_KEY`         | Blob storage key                            | Optional (enables upload)                                                  |
-| `AZURE_STORAGE_CONTAINER`   | Target container                            | Default: `$web` (static website)                                           |
-| `AZURE_UPLOAD_SYNC_DELETE`  | Delete remote orphans on upload             | Default: `false` (danger when true)                                        |
-| `FETCH_INTERVAL_MINUTES`    | Base interval fallback                      | Default: `30`                                                              |
-| `SCHEDULER_TIMEZONE`        | Override schedule TZ if not in `feeds.yaml` | Default: `UTC`                                                             |
-| `SCHEDULER_RUN_IMMEDIATELY` | Run once on boot before schedule loop       | Default: `false`                                                           |
+| `AZURE_STORAGE_ACCOUNT`     | Blob storage account                        | Optional (enables upload)                                                   |
+| `AZURE_STORAGE_KEY`         | Blob storage key                            | Optional (enables upload)                                                   |
+| `AZURE_STORAGE_CONTAINER`   | Target container                            | Default: `$web` (static website)                                            |
+| `AZURE_UPLOAD_SYNC_DELETE`  | Delete remote orphans on upload             | Default: `false` (danger when true)                                         |
+| `FETCH_INTERVAL_MINUTES`    | Base interval fallback                      | Default: `30`                                                               |
+| `SCHEDULER_TIMEZONE`        | Override schedule TZ if not in `feeds.yaml` | Default: `UTC`                                                              |
+| `SCHEDULER_RUN_IMMEDIATELY` | Run once on boot before schedule loop       | Default: `false`                                                            |
+
+### Provider requirements
+
+- `LLM_PROVIDER=azure` requires `AZURE_ENDPOINT`, `OPENAI_API_KEY`, `DEPLOYMENT_NAME`, `OPENAI_API_VERSION`.
+- `LLM_PROVIDER=github_models` requires `LLM_API_KEY` (GitHub PAT with `models:read`) and `LLM_MODEL`.
 
 ## Retention & batching controls
 

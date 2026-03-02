@@ -17,6 +17,7 @@ from aiohttp import ClientSession
 from config import config, get_logger
 from services.telemetry import trace_span
 from services.llm_client import chat_completion as default_ai_chat_completion
+from services.llm_client import is_llm_enabled
 from models import DatabaseQueue
 from workers.publisher.settings import (
     load_feeds_config,
@@ -68,6 +69,22 @@ def _get_ai_chat_completion():
     except Exception:
         pass
     return default_ai_chat_completion
+
+
+def _llm_span_attributes(prompt_text: str) -> Dict[str, Any]:
+    provider = str(getattr(config, "LLM_PROVIDER", "azure") or "azure").strip().lower()
+    attrs: Dict[str, Any] = {
+        "prompt.length": len(prompt_text or ""),
+        "llm.provider": provider,
+    }
+    if provider == "azure":
+        if getattr(config, "DEPLOYMENT_NAME", None):
+            attrs["azure.openai.deployment"] = config.DEPLOYMENT_NAME
+        if getattr(config, "OPENAI_API_VERSION", None):
+            attrs["azure.openai.api_version"] = config.OPENAI_API_VERSION
+    elif getattr(config, "LLM_MODEL", None):
+        attrs["llm.model"] = config.LLM_MODEL
+    return attrs
 
 
 class RSSPublisher:
@@ -225,13 +242,9 @@ class RSSPublisher:
         return generate_markdown_bulletin(summaries)
 
     @trace_span(
-        "publisher.azure_openai.intro",
+        "publisher.llm.intro",
         tracer_name="publisher",
-        attr_from_args=lambda self, markdown_bulletin, session: {
-            "prompt.length": len(markdown_bulletin or ""),
-            "azure.openai.deployment": config.DEPLOYMENT_NAME,
-            "azure.openai.api_version": config.OPENAI_API_VERSION,
-        },
+        attr_from_args=lambda self, markdown_bulletin, session: _llm_span_attributes(markdown_bulletin),
     )
     async def _generate_ai_introduction(self, markdown_bulletin: str, session: ClientSession) -> Optional[str]:
         """Backward-compatible wrapper for AI introduction generation."""
@@ -243,13 +256,9 @@ class RSSPublisher:
         )
 
     @trace_span(
-        "publisher.azure_openai.title",
+        "publisher.llm.title",
         tracer_name="publisher",
-        attr_from_args=lambda self, markdown_bulletin, session: {
-            "prompt.length": len(markdown_bulletin or ""),
-            "azure.openai.deployment": config.DEPLOYMENT_NAME,
-            "azure.openai.api_version": config.OPENAI_API_VERSION,
-        },
+        attr_from_args=lambda self, markdown_bulletin, session: _llm_span_attributes(markdown_bulletin),
     )
     async def _generate_ai_title(self, markdown_bulletin: str, session: ClientSession) -> Optional[str]:
         """Backward-compatible wrapper for AI title generation."""
@@ -279,7 +288,7 @@ class RSSPublisher:
             prompts=self.prompts,
             db=self.db,
             enable_intro=enable_intro,
-            llm_enabled=bool(config.AZURE_ENDPOINT and config.OPENAI_API_KEY),
+            llm_enabled=is_llm_enabled(),
             get_published_summaries_by_date=self.get_published_summaries_by_date,
             ai_chat_completion_fn=_get_ai_chat_completion(),
             generate_markdown_bulletin=self._generate_markdown_bulletin,
@@ -518,9 +527,6 @@ class RSSPublisher:
         
         logger.info(f"Published {html_count} HTML bulletins, {rss_count} summary RSS feeds, {pt_count} passthrough RSS feeds")
         return html_count, rss_count
-
-
-
 
 
 

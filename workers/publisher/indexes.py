@@ -30,6 +30,7 @@ async def write_feeds_index(
     summaries_config = config_data.get("summaries", {}) if isinstance(config_data, dict) else {}
 
     feeds_info: List[Dict[str, str]] = []
+    html_bulletins_dir = rss_feeds_dir.parent / "bulletins"
     for rss_file in sorted(rss_files):
         group_name = rss_file.stem
         group_config = summaries_config.get(group_name) if isinstance(summaries_config.get(group_name), dict) else {}
@@ -64,6 +65,7 @@ async def write_feeds_index(
                 "description": group_config.get("description", f"{group_name} news summaries"),
                 "filename": rss_file.name,
                 "latest_title": latest_title,
+                "has_bulletin": (html_bulletins_dir / f"{group_name}.html").exists(),
             }
         )
 
@@ -189,8 +191,11 @@ async def write_bulletins_index(
 
     template = env.get_template("bulletins_index.html")
     current_time = datetime.now(timezone.utc)
-    # Normalize base_url to not end with slash for consistent URL construction
+    # Normalize base_url to not end with slash for consistent URL construction.
+    # If config is still the placeholder example.com, prefer relative links so local preview works.
     normalized_base_url = base_url.rstrip('/') if base_url else ''
+    if "example.com" in normalized_base_url:
+        normalized_base_url = ''
     html_content = template.render(
         bulletins_info=bulletins_info,
         current_time=current_time,

@@ -102,7 +102,9 @@
             <div class="feed-links">
                 <!-- This index renders at /feeds/index.html; feed XML files are siblings in the same directory -->
                 <a href="{{ feed.filename }}" class="feed-link rss-link">📡 RSS Feed</a>
+                {% if feed.has_bulletin %}
                 <a href="../bulletins/{{ feed.name }}.html" class="feed-link html-link">📄 HTML Bulletin</a>
+                {% endif %}
             </div>
         </div>
         {% endfor %}

@@ -5,6 +5,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from aiohttp import ClientSession
 
 from config import config, get_logger
+from services.llm_client import is_llm_enabled
 from workers.publisher.merge import collect_summary_links, merge_similar_summaries, summary_id_list
 from workers.publisher.html_renderer import generate_bulletin_html
 from workers.publisher.titles import with_session_intro_and_title
@@ -139,7 +140,8 @@ async def process_bulletin_chunk(
 
     introduction: Optional[str] = None
     ai_title: Optional[str] = None
-    if config.AZURE_ENDPOINT and config.OPENAI_API_KEY:
+    llm_enabled = is_llm_enabled()
+    if llm_enabled:
         try:
             markdown_bulletin = generate_markdown_bulletin(summaries)
             introduction, ai_title = await with_session_intro_and_title(
@@ -302,7 +304,7 @@ async def process_bulletin_chunk(
                 if any(source_id in chunk_ids for source_id in summary_id_list(s))
             ]
             chunk_intro = ""
-            if enable_intro and config.AZURE_ENDPOINT and config.OPENAI_API_KEY and chunk_summaries:
+            if enable_intro and llm_enabled and chunk_summaries:
                 try:
                     chunk_markdown = generate_markdown_bulletin(chunk_summaries)
                     async with ClientSession() as session:
@@ -315,7 +317,7 @@ async def process_bulletin_chunk(
                         exc,
                     )
             chunk_title = None
-            if config.AZURE_ENDPOINT and config.OPENAI_API_KEY and chunk_summaries:
+            if llm_enabled and chunk_summaries:
                 try:
                     async with ClientSession() as session:
                         chunk_markdown = generate_markdown_bulletin(chunk_summaries)
