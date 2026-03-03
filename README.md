@@ -1,84 +1,81 @@
-# Feed Summarizer
+# Feed Summarizer (Fork)
 
-Funny story: This was mostly a vibe-coded project that got out of hand. It actually started as a Node-RED flow for personal use, then morphed into a Python script, and I thought it would both help me save time reading news in the mornings and make for a great demo of spec-driven development.
+This repository is a fork of the original `feed-summarizer` project by **Ricardo "rcarmo" Carmo**.
 
-As a direct outcome of my swearing at various LLMs, it became this, which is, in a mouthful, an `asyncio`-based background service that fetches multiple RSS/Atom (and optional Mastodon) sources, stores raw items in SQLite, generates AI summaries (Azure OpenAI or GitHub Models), groups them into bulletins, and publishes both HTML and RSS outputs (optionally uploading to Azure Blob Static Website hosting).
+- Original repository: `https://github.com/rcarmo/feed-summarizer`
+- Original README: `https://github.com/rcarmo/feed-summarizer/blob/main/README.md`
 
-And the end-user experience, for me (using [Reeder Classic](https://reederapp.com/classic)), looks like this:
+## Attribution and AI Notice
 
-![Feed Summarizer Example Output](docs/reeder.png)
+- The original architecture and project direction come from the upstream project by `rcarmo`.
+- The fork-specific changes in this repository are intentionally documented as **AI-generated changes**.
+- In other words: modifications introduced in this fork were produced through AI-assisted development workflows.
 
-Neatly organized by topic, with concise summaries and links to the original articles, all in a clean, readable format I can peruse over breakfast.
+## What This Project Does
 
-## Overview
+`feed-summarizer` is an async pipeline that:
 
-The pipeline is designed for efficiency (conditional fetching, batching, backoff) and the output is tailored to my reading habits (three "bulletins" per day that group items by topic, each bulletin published as both HTML and an RSS entry).
+- fetches RSS/Atom sources,
+- stores processing state in SQLite,
+- summarizes/group items into bulletin sessions,
+- publishes static HTML and RSS outputs under `public/`.
 
-Most of the implementation started as a vibe-coded prototype, with some manual tweaking here and there, but it now has extensive error handling, logging, and observability hooks for Azure Application Insights via OpenTelemetry, and it publishes to Azure Blob Storage for publishing the results because there is no way I am letting this thing run a web server.
+Output can be consumed locally, on private static hosting (for example over Tailscale), or via GitHub Pages.
 
-It is also deployable as a Docker Swarm service using [`kata`](https://github.com/rcarmo/kata), a private helper tool used for my own infrastructure.
+## Fork-Specific Changes
 
+This fork adds and/or changes the following:
 
-## Quickstart (5 commands)
+1. LLM provider abstraction
+- Added provider-aware LLM routing with support for `azure` and `github_models`.
+- Added `LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`, and `LLM_API_KEY` configuration.
+
+2. GitHub Models integration
+- Enabled summarization/title/intro flows to run using GitHub Models endpoint.
+- Replaced Azure-only feature checks with provider-aware `llm_enabled` gating.
+
+3. Static publishing improvements
+- Fixed index link behavior for local/static use to avoid `example.com` redirects.
+- Ensured feeds index only shows bulletin links when bulletin files exist.
+
+4. GitHub Pages deployment workflow
+- Added `.github/workflows/publish-pages.yml`.
+- Added scheduled + manual dispatch deployment modes.
+- Added `feeds.db` cache restore/save to preserve generator continuity between runs.
+- Added support for private feed config via Actions secrets:
+  - `FEEDS_YAML` (raw YAML)
+  - `FEEDS_YAML_B64` (base64 fallback)
+
+5. Tooling and runtime standardization
+- Migrated project workflow to `uv` (`uv sync`, `uv run`, `uv add`, `uv lock`).
+- Added `.python-version`, `pyproject.toml` project metadata/dependencies, and `uv.lock`.
+- Added `AGENTS.md` to enforce `uv`-based development commands.
+
+6. Docs and test updates
+- Added `ENV-MIGRATION.md` and extended config/publishing docs.
+- Added GitHub Pages setup doc: `docs/GITHUB_PAGES.md`.
+- Added provider-selection tests and updated test compatibility paths.
+
+## Quickstart (uv)
 
 ```bash
-uv sync                           # 1. Create/sync project environment
-cp feeds.yaml.example feeds.yaml  # 2. Seed a starter config (edit it)
-uv run python main.py run         # 3. Full pipeline run (fetch→summarize→publish→upload*)
-uv run pytest                     # 4. Run tests
-uv run ruff check .               # 5. Lint
+uv sync
+cp feeds.yaml.example feeds.yaml
+uv run python main.py run --no-azure
+uv run python -m http.server 8000 -d public
 ```
 
-(\*) Azure upload happens only if storage env vars are set; otherwise it is skipped automatically.
-
-Without Azure upload, generated output is still fully consumable from `public/`:
-
-- `public/index.html` (landing page)
-- `public/bulletins/*.html` (latest bulletin per group)
-- `public/feeds/*.xml` (summary RSS feeds)
-
-You can serve this directory with any static server, for example:
-
-```bash
-python3 -m http.server 8000 -d public
-```
-
-## Features
-
-- Concurrent conditional feed fetching (ETag / Last-Modified; respectful backoff & error tracking)
-- Optional reader mode & GitHub README enrichment for richer summarization context
-- AI summarization with per‑group introductions (opt‑in) via Azure OpenAI or GitHub Models
-- Topic/group bulletins rendered as responsive HTML + RSS 2.0 feeds
-- SimHash-powered dedupe (optional BM25/FTS5 fallback) merges near-duplicate summaries and surfaces every source link
-- Optional passthrough (raw) feeds with minimal processing
-- Smart time‑based scheduling (timezone aware) plus interval overrides
-- Azure Blob Storage upload with MD5 de‑dup (skip unchanged) & optional sync delete
-- Graceful shutdown with executor timeouts and robust logging
-- Config hot‑reload for feeds; caching of YAML & prompt data
-- Observability hooks via OpenTelemetry (HTTP, DB, custom spans)
+Then open `http://127.0.0.1:8000/`.
 
 ## Documentation
 
-Long-form documentation is in the `docs/` folder:
+- `docs/CONFIGURATION.md`
+- `docs/RUNNING.md`
+- `docs/PUBLISHING.md`
+- `docs/GITHUB_PAGES.md`
+- `ENV-MIGRATION.md`
+- `PLAN.md`
 
-- [CONFIGURATION](docs/CONFIGURATION.md) (env vars, secrets, scheduling)
-- [RUNNING](docs/RUNNING.md) (CLI modes, flags, scheduling)
-- [PUBLISHING](docs/PUBLISHING.md) (output paths, Azure upload)
-- [GITHUB_PAGES](docs/GITHUB_PAGES.md) (scheduled Actions deployment to Pages)
-- [ENV-MIGRATION](ENV-MIGRATION.md) (Azure to GitHub Models and static hosting env setups)
-- [TELEMETRY](docs/TELEMETRY.md) (OpenTelemetry + Azure exporter)
-- [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) (common symptoms and fixes)
-- [ARCHITECTURE](docs/ARCHITECTURE.md) (module map and pipeline flow)
-- [MERGE_TUNING](docs/MERGE_TUNING.md) (dedupe/merge behavior and diagnostics)
-- [RETENTION](docs/RETENTION.md) (age window & retention controls)
-- [SPEC](docs/SPEC.md) (long-form architecture/runtime spec)
+## License
 
----
-
-## Contributions & License
-
-See `LICENSE` (MIT) for licensing details. Contribution guidelines and a code of conduct will be documented in `CONTRIBUTING.md` and `CODE_OF_CONDUCT.md` as the project evolves. Security reports: (will be defined in `SECURITY.md`).
-
-## Attribution
-
-Some components and refactoring work were assisted by AI tooling; all code is reviewed for clarity and maintainability.
+This fork remains under the same project license (`LICENSE`). Please also review upstream licensing and attribution in the original repository.
